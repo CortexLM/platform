@@ -1,0 +1,44 @@
+[package]
+name = "platform-validator-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pv"
+path = "src/main.rs"
+
+[dependencies]
+# Internal dependencies
+platform-engine-api-client = { workspace = true }
+platform-engine-challenge-spec = { workspace = true }
+platform-engine-dynamic-values = { workspace = true }
+
+# Core dependencies
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Git operations
+git2 = "0.20"
+
+# File operations
+walkdir = { workspace = true }
+
+# Terminal UI
+inquire = "0.7"
+regex = "1"
+
+# Path handling
+url = { workspace = true }
+
+# UUID
+uuid = { workspace = true, features = ["v4"] }

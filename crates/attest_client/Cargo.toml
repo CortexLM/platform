@@ -1,0 +1,42 @@
+[package]
+name = "platform-engine-attest-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal dependencies
+platform-engine-challenge-spec = { workspace = true }
+
+# Core dependencies
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Cryptography
+ring = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+
+# Dstack integration only
+
+# Async runtime
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Collections
+indexmap = { workspace = true }
+
+# Hex encoding
+hex = { workspace = true }

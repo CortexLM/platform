@@ -1,0 +1,3 @@
+[submodule "dstack"]
+	path = dstack
+	url = https://github.com/Dstack-TEE/dstack

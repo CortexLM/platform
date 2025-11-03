@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "platform-validator",
+  "runner": "docker-compose",
+  "docker_compose_file": "version: '3.8'\nservices:\n  validator:\n    image: platform-validator:latest\n    ports:\n      - '18080:18080'\n    environment:\n      - VALIDATOR_HOTKEY=${VALIDATOR_HOTKEY}\n      - PLATFORM_BASE_API=${PLATFORM_BASE_API}\n      - DSTACK_VMM_URL=${DSTACK_VMM_URL}\n    volumes:\n      - ./config.toml:/app/config.toml:ro\n      - ./data:/data",
+  "kms_enabled": false,
+  "gateway_enabled": false,
+  "local_key_provider_enabled": false,
+  "key_provider_id": "",
+  "public_logs": false,
+  "public_sysinfo": false,
+  "allowed_envs": [],
+  "no_instance_id": false,
+  "secure_time": false
+}

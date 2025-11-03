@@ -1,0 +1,32 @@
+[package]
+name = "platform-engine-dynamic-values"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async runtime
+async-trait = { workspace = true }
+
+# UUID
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Chrono for timestamps
+chrono = { workspace = true }
+
+[dev-dependencies]
+# Tempfile for tests
+tempfile = { workspace = true }

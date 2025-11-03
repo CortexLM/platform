@@ -1,0 +1,57 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+validator.db
+
+# Data
+data/
+runs/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+
+# Docker
+docker-compose.override.yml
+
+# Configuration (can contain secrets)
+config.toml
+
+# Temporary files
+*.tmp
+*.temp
+
+# Coverage
+cobertura.xml
+*.gcov
+*.gcda
+*.gcno
+
+# Vendor (submodules)
+vendor/
+
+# Node modules
+node_modules/
+
