@@ -596,25 +596,48 @@ impl ChallengeWsClient {
             }
         });
         
+        // Convert RTMRs from BTreeMap to Vec<String> (before using event_log)
+        let rtmrs = quote_response.replay_rtmrs()
+            .map(|rtmrs_map| {
+                let mut rtmrs_vec = Vec::new();
+                for i in 0..4 {
+                    if let Some(rtmr) = rtmrs_map.get(&i) {
+                        rtmrs_vec.push(rtmr.clone());
+                    } else {
+                        rtmrs_vec.push("0".repeat(96).to_string());
+                    }
+                }
+                rtmrs_vec
+            })
+            .unwrap_or_else(|_| {
+                vec![
+                    "0".repeat(96).to_string(),
+                    "0".repeat(96).to_string(),
+                    "0".repeat(96).to_string(),
+                    "0".repeat(96).to_string(),
+                ]
+            });
+        
         // Add environment_mode to event_log
         let mut event_log = quote_response.event_log;
         if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(&event_log) {
             let mut event_log_dict = event_log_json.as_object().cloned().unwrap_or_default();
             event_log_dict.insert("environment_mode".to_string(), serde_json::Value::String(validator_env_mode));
             event_log = serde_json::to_string(&event_log_dict)
-                .unwrap_or_else(|_| quote_response.event_log.clone());
+                .unwrap_or_else(|_| event_log.clone());
         } else {
             // If event_log is not JSON, create new JSON with environment_mode
+            let original_event_log = event_log.clone();
             event_log = serde_json::json!({
                 "environment_mode": validator_env_mode,
-                "original": quote_response.event_log,
+                "original": original_event_log,
             }).to_string();
         }
         
         Ok(ValidatorQuoteData {
             quote_b64: base64::encode(quote_response.quote),
             event_log,
-            rtmrs: quote_response.replay_rtmrs(),
+            rtmrs,
         })
     }
     

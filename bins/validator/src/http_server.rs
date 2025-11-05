@@ -969,8 +969,10 @@ async fn attest(
 
     // On success, bind session token to ephemeral public key and store AEAD key
     if let Some(session_token) = val.get("session_token").and_then(|v| v.as_str()) {
-        let pubkey =
-            base64::decode(&req.ephemeral_public_key).map_err(|_| StatusCode::BAD_REQUEST)?;
+        use base64::{Engine as _, engine::general_purpose};
+        let pubkey = general_purpose::STANDARD
+            .decode(&req.ephemeral_public_key)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

@@ -274,7 +274,7 @@ mod tests {
 
         let challenges = vec![ChallengeWeight {
             compose_hash: "hash1".to_string(),
-            mechanism_id: "mech1".to_string(),
+            mechanism_id: 1,
             emission_share: 1.0,
             raw_weights: weights,
         }];
@@ -296,13 +296,13 @@ mod tests {
         let challenges = vec![
             ChallengeWeight {
                 compose_hash: "hash1".to_string(),
-                mechanism_id: "mech1".to_string(),
+                mechanism_id: 1,
                 emission_share: 0.6,
                 raw_weights: weights1,
             },
             ChallengeWeight {
                 compose_hash: "hash2".to_string(),
-                mechanism_id: "mech2".to_string(),
+                mechanism_id: 2,
                 emission_share: 0.4,
                 raw_weights: weights2,
             },
