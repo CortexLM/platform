@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
+use uuid::Uuid;
 
 // VMM types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,18 +63,35 @@ pub struct Id {
 pub struct VmmClient {
     vmm_url: String,
     client: Client,
+    mock_mode: bool,
 }
 
 impl VmmClient {
     pub fn new(vmm_url: String) -> Self {
+        let mock_mode = std::env::var("VALIDATOR_MOCK_VMM")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+        
+        if mock_mode {
+            tracing::warn!("🔧 MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)");
+        }
+        
         Self {
             vmm_url,
             client: Client::new(),
+            mock_mode,
         }
     }
 
     /// Create a CVM with the given configuration
     pub async fn create_vm(&self, config: VmConfiguration) -> Result<String> {
+        if self.mock_mode {
+            // Mock mode: return fake VM ID without actually creating a VM
+            let vm_id = format!("mock-vm-{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+            info!("🔧 MOCK VMM: Created fake VM {} for {}", vm_id, config.name);
+            return Ok(vm_id);
+        }
+
         info!("Creating VM: {}", config.name);
 
         let url = format!("{}/prpc/CreateVm?json", self.vmm_url);
@@ -158,6 +176,26 @@ impl VmmClient {
 
     /// Get VM info by ID
     pub async fn get_vm_info(&self, vm_id: &str) -> Result<VmInfo> {
+        if self.mock_mode {
+            // Mock mode: return fake VM info
+            info!("🔧 MOCK VMM: Returning fake VM info for {}", vm_id);
+            return Ok(VmInfo {
+                id: vm_id.to_string(),
+                name: format!("mock-{}", vm_id),
+                status: "Running".to_string(),
+                uptime: "0s".to_string(),
+                app_url: Some(format!("http://mock-vm-{}:8080", vm_id)),
+                app_id: "mock-app-id".to_string(),
+                instance_id: Some(format!("mock-instance-{}", vm_id)),
+                configuration: serde_json::json!({}),
+                exited_at: None,
+                boot_progress: "100".to_string(),
+                boot_error: "".to_string(),
+                shutdown_progress: "".to_string(),
+                image_version: "mock".to_string(),
+            });
+        }
+
         let url = format!("{}/prpc/GetInfo?json", self.vmm_url);
 
         let payload = json!({
@@ -176,6 +214,11 @@ impl VmmClient {
 
     /// Remove a VM
     pub async fn remove_vm(&self, vm_id: &str) -> Result<()> {
+        if self.mock_mode {
+            info!("🔧 MOCK VMM: Removing fake VM {}", vm_id);
+            return Ok(());
+        }
+
         info!("Removing VM: {}", vm_id);
 
         let url = format!("{}/prpc/RemoveVm?json", self.vmm_url);
@@ -193,6 +236,11 @@ impl VmmClient {
 
     /// Start a VM
     pub async fn start_vm(&self, vm_id: &str) -> Result<()> {
+        if self.mock_mode {
+            info!("🔧 MOCK VMM: Starting fake VM {}", vm_id);
+            return Ok(());
+        }
+
         info!("Starting VM: {}", vm_id);
 
         let url = format!("{}/prpc/StartVm?json", self.vmm_url);
@@ -210,6 +258,11 @@ impl VmmClient {
 
     /// Stop a VM
     pub async fn stop_vm(&self, vm_id: &str) -> Result<()> {
+        if self.mock_mode {
+            info!("🔧 MOCK VMM: Stopping fake VM {}", vm_id);
+            return Ok(());
+        }
+
         info!("Stopping VM: {}", vm_id);
 
         let url = format!("{}/prpc/StopVm?json", self.vmm_url);
@@ -227,6 +280,11 @@ impl VmmClient {
 
     /// Kill a VM (force shutdown)
     pub async fn kill_vm(&self, vm_id: &str) -> Result<()> {
+        if self.mock_mode {
+            info!("🔧 MOCK VMM: Killing fake VM {}", vm_id);
+            return Ok(());
+        }
+
         info!("Killing VM: {}", vm_id);
 
         let url = format!("{}/prpc/ShutdownVm?json", self.vmm_url);
@@ -269,6 +327,26 @@ pub struct VmInfo {
 /// Get VMM metadata including available resources
 impl VmmClient {
     pub async fn get_meta(&self) -> Result<VmmMetadata> {
+        if self.mock_mode {
+            // Mock mode: return fake metadata
+            info!("🔧 MOCK VMM: Returning fake VMM metadata");
+            return Ok(VmmMetadata {
+                kms: None,
+                gateway: Some(GatewaySettings {
+                    url: "http://mock-gateway:8080".to_string(),
+                    base_domain: "mock-gateway".to_string(),
+                    port: 8080,
+                    agent_port: 8081,
+                    urls: vec!["http://mock-gateway:8080".to_string()],
+                }),
+                resources: Some(ResourcesSettings {
+                    max_cvm_number: 10,
+                    max_allocable_vcpu: 16,
+                    max_allocable_memory_in_mb: 32768,
+                }),
+            });
+        }
+
         let url = format!("{}/prpc/GetMeta?json", self.vmm_url);
 
         let response = self.client.post(&url).json(&json!({})).send().await?;
@@ -280,6 +358,12 @@ impl VmmClient {
 
     /// List all VMs
     pub async fn list_vms(&self) -> Result<Vec<VmInfo>> {
+        if self.mock_mode {
+            // Mock mode: return empty list
+            info!("🔧 MOCK VMM: Returning empty VM list");
+            return Ok(vec![]);
+        }
+
         let url = format!("{}/prpc/Status?json", self.vmm_url);
 
         let response = self.client.post(&url).json(&json!({})).send().await?;

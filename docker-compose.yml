@@ -27,7 +27,7 @@ services:
       - "8080:8080"
     environment:
       - VALIDATOR_HOTKEY=${VALIDATOR_HOTKEY}
-      - PLATFORM_BASE_API=${PLATFORM_BASE_API:-http://platform-api:8080}
+      - PLATFORM_BASE_API=${PLATFORM_BASE_API:-http://platform-api:3000}
       - DSTACK_VMM_URL=${DSTACK_VMM_URL:-http://dstack-vmm:11530}
       - VALIDATOR_CPU_CORES=${VALIDATOR_CPU_CORES:-4}
       - VALIDATOR_MEMORY_MB=${VALIDATOR_MEMORY_MB:-2048}

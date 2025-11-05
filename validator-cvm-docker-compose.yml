@@ -14,7 +14,7 @@ services:
       - HOTKEY_PASSPHRASE=${HOTKEY_PASSPHRASE}
       
       # API Platform
-      - PLATFORM_BASE_API=${PLATFORM_BASE_API:-http://platform-api:8080}
+      - PLATFORM_BASE_API=${PLATFORM_BASE_API:-http://platform-api:3000}
       
       # URL du VMM pour créer des CVMs (depuis un CVM, utiliser le gateway host)
       - DSTACK_VMM_URL=${DSTACK_VMM_URL:-http://10.0.2.2:11530}

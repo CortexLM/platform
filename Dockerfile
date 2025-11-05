@@ -24,16 +24,28 @@ COPY crates ./crates
 COPY bins ./bins
 
 # Build dependencies only (layer caching optimization)
-RUN cargo fetch --verbose
+# Use BuildKit cache mounts for faster rebuilds
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --verbose
 
 # Copy the rest of the application code
 COPY . .
 
-# Build release binaries
-RUN cargo build --release --bin validator --bin pv
+# Build release binaries with BuildKit cache mounts
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bin validator --bin pv
 
-# Strip binaries to reduce size
-RUN strip target/release/validator target/release/pv
+# Copy binaries to a non-cached location (so they're available in next stage)
+# Strip binaries to reduce size while copying
+RUN --mount=type=cache,target=/app/target \
+    mkdir -p /app/binaries && \
+    cp target/release/validator /app/binaries/validator && \
+    cp target/release/pv /app/binaries/pv && \
+    strip /app/binaries/validator /app/binaries/pv 2>/dev/null || true && \
+    test -f /app/binaries/validator && test -f /app/binaries/pv
 
 # ============================================================================
 # Stage 2: Minimal runtime image
@@ -57,12 +69,13 @@ USER platform
 
 WORKDIR /app
 
-# Copy binaries from builder stage
-COPY --from=builder --chown=platform:platform /app/target/release/validator ./validator
-COPY --from=builder --chown=platform:platform /app/target/release/pv ./pv
+# Copy binaries from builder stage (from non-cached location)
+COPY --from=builder --chown=platform:platform /app/binaries/validator ./validator
+COPY --from=builder --chown=platform:platform /app/binaries/pv ./pv
 
-# Copy config file
-COPY --chown=platform:platform config.toml ./
+# Note: config.toml is not required - validator uses environment variables only
+# If config.toml is needed in the future, uncomment the line below:
+# COPY --chown=platform:platform config.toml ./
 
 # Add binaries to PATH
 ENV PATH="/app:${PATH}"

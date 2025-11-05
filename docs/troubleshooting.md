@@ -10,7 +10,7 @@ Common errors and solutions for the Platform Validator.
 
 **Solution**:
 - Verify `PLATFORM_BASE_API` environment variable is correct
-- Check network connectivity: `curl http://platform-api:8080/health`
+- Check network connectivity: `curl http://platform-api:3000/health`
 - Verify Platform API is running
 
 ### Error: "WebSocket connection failed"

@@ -62,7 +62,7 @@ Configure and run:
 
 ```bash
 export VALIDATOR_HOTKEY="5DD..."
-export PLATFORM_BASE_API="http://platform-api:8080"
+export PLATFORM_BASE_API="http://platform-api:3000"
 export DSTACK_VMM_URL="http://dstack-vmm:11530"
 export VALIDATOR_CPU_CORES=4
 export VALIDATOR_MEMORY_MB=2048

@@ -150,7 +150,7 @@ Set the following environment variables before creating the CVM:
 
 ```bash
 export VALIDATOR_HOTKEY="5DD..."
-export PLATFORM_BASE_API="http://platform-api:8080"
+export PLATFORM_BASE_API="http://platform-api:3000"
 export DSTACK_VMM_URL="http://127.0.0.1:11530"
 export VALIDATOR_PORT=18080
 export VALIDATOR_BASE_URL="http://10.0.2.2:18080"

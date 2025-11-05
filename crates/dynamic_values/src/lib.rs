@@ -217,6 +217,81 @@ impl DynamicValuesManager {
 
         Ok(result)
     }
+
+    // Private environment variables helpers
+
+    /// Set a private environment variable for a challenge
+    /// Private env vars are stored with prefix "env_private:" to distinguish them from other dynamic values
+    pub async fn set_private_env_var(
+        &self,
+        challenge_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let prefixed_key = format!("env_private:{}", key);
+        self.set_value(challenge_id, &prefixed_key, serde_json::Value::String(value.to_string()))
+            .await
+    }
+
+    /// Get a private environment variable for a challenge
+    pub async fn get_private_env_var(
+        &self,
+        challenge_id: &str,
+        key: &str,
+    ) -> Result<Option<String>> {
+        let prefixed_key = format!("env_private:{}", key);
+        match self.get_value(challenge_id, &prefixed_key).await? {
+            Some(serde_json::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Ok(None), // Non-string value, return None
+            None => Ok(None),
+        }
+    }
+
+    /// Get all private environment variables for a challenge
+    /// Returns a HashMap of env var names (without prefix) to their values
+    pub async fn get_private_env_vars(
+        &self,
+        challenge_id: &str,
+    ) -> Result<HashMap<String, String>> {
+        let conn = self.conn.clone();
+        let challenge_id = challenge_id.to_string();
+        let prefix = "env_private:".to_string();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT key, value FROM dynamic_values WHERE challenge_id = ?1 AND key LIKE ?2"
+            )?;
+
+            let search_pattern = format!("{}%", prefix);
+            let rows = stmt.query_map(params![challenge_id, search_pattern], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+
+            let mut env_vars = HashMap::new();
+            for row in rows {
+                let (key, value_str) = row?;
+                // Remove prefix from key
+                if let Some(key_without_prefix) = key.strip_prefix(&prefix) {
+                    // Parse JSON value (should be a string)
+                    match serde_json::from_str::<serde_json::Value>(&value_str) {
+                        Ok(serde_json::Value::String(s)) => {
+                            env_vars.insert(key_without_prefix.to_string(), s);
+                        }
+                        _ => {
+                            // If not a string, skip it
+                            tracing::warn!("Private env var {} has non-string value, skipping", key);
+                        }
+                    }
+                }
+            }
+
+            Ok::<HashMap<String, String>, rusqlite::Error>(env_vars)
+        })
+        .await??;
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

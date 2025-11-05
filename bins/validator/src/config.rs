@@ -29,7 +29,10 @@ impl ValidatorConfig {
         let validator_hotkey = derive_hotkey_from_mnemonic(&passphrase)
             .context("Failed to derive hotkey from mnemonic passphrase")?;
 
-        let platform_api_url = "https://api.platform.network".to_string();
+        // Get platform API URL from environment (PLATFORM_BASE_API or PLATFORM_API_URL)
+        let platform_api_url = env::var("PLATFORM_BASE_API")
+            .or_else(|_| env::var("PLATFORM_API_URL"))
+            .unwrap_or_else(|_| "https://api.platform.network".to_string());
 
         let dstack_vmm_url =
             env::var("DSTACK_VMM_URL").unwrap_or_else(|_| "http://localhost:11530".to_string());

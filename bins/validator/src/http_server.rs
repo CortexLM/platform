@@ -722,7 +722,7 @@ async fn results_heartbeat(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let client = reqwest::Client::new();
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let resp = client
         .post(&format!("{}/results/heartbeat", platform_api_url))
         .json(&payload)
@@ -749,7 +749,7 @@ async fn results_log(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let client = reqwest::Client::new();
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let resp = client
         .post(&format!("{}/results/logs", platform_api_url))
         .json(&payload)
@@ -779,7 +779,7 @@ async fn results_submit(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let client = reqwest::Client::new();
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let resp = client
         .post(&format!("{}/results/submit", platform_api_url))
         .json(&payload)

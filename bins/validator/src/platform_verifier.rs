@@ -68,17 +68,17 @@ impl PlatformVerifier {
         // Check if warning is present
         if let Some(warning) = &version_info.warning {
             if !warning.is_empty() {
-                warn!("⚠️  Platform-API warning: {}", warning);
+                warn!("Platform-API warning: {}", warning);
             }
         }
 
         // Get public key
         let public_key = &version_info.platform_api.public_key;
-        info!("🔑 Platform-API public key: {}", public_key);
+        info!("Platform-API public key: {}", public_key);
 
         // Check if compose_hash is unknown
         if compose_hash == "unknown" {
-            error!("🚨 Platform-API compose_hash is UNKNOWN - Cannot verify integrity");
+            error!("Platform-API compose_hash is UNKNOWN - Cannot verify integrity");
             error!("   Compose hash not available from TDX attestation");
             return Ok(false);
         }
@@ -86,27 +86,27 @@ impl PlatformVerifier {
         // Verify public key matches expected key for this compose_hash
         if let Some(expected_key) = self.calculate_expected_public_key(compose_hash) {
             if &expected_key != public_key {
-                error!("🚨 Platform-API public key MISMATCH");
+                error!("Platform-API public key MISMATCH");
                 error!("   Expected: {}", expected_key);
                 error!("   Received: {}", public_key);
-                error!("   ⚠️  Possible key compromise or wrong compose_hash");
+                error!("   WARNING: Possible key compromise or wrong compose_hash");
                 return Ok(false);
             } else {
-                info!("✅ Platform-API public key verified");
+                info!("Platform-API public key verified");
             }
         }
 
         // Check if compose_hash changed
         if let Some(last_hash) = &self.last_verified_commit {
             if last_hash != compose_hash {
-                warn!("⚠️  Platform-API compose_hash CHANGED");
+                warn!("Platform-API compose_hash CHANGED");
                 warn!("   Previous: {}", last_hash);
                 warn!("   Current:  {}", compose_hash);
-                warn!("   ⚠️  Possible compromise or update - investigate immediately");
+                warn!("   WARNING: Possible compromise or update - investigate immediately");
             }
         } else {
             info!(
-                "📝 First verification of platform-api compose_hash: {}",
+                "First verification of platform-api compose_hash: {}",
                 compose_hash
             );
         }
@@ -114,18 +114,18 @@ impl PlatformVerifier {
         // Check if compose_hash is in allowed list
         if !self.allowed_commits.is_empty() {
             if !self.allowed_commits.contains(compose_hash) {
-                error!("🚨 Platform-API compose_hash NOT IN ALLOWED LIST");
+                error!("Platform-API compose_hash NOT IN ALLOWED LIST");
                 error!("   Compose hash: {}", compose_hash);
                 error!("   Allowed hashes: {:?}", self.allowed_commits);
-                error!("   ⚠️  UNAUTHORIZED Docker image - Possible compromise");
+                error!("   WARNING: UNAUTHORIZED Docker image - Possible compromise");
                 return Ok(false);
             } else {
-                info!("✅ Platform-API compose_hash verified: {}", compose_hash);
+                info!("Platform-API compose_hash verified: {}", compose_hash);
             }
         } else {
             // No allowed hashes configured - just log the hash
             info!(
-                "📝 Platform-API compose_hash: {} (no allowed list configured)",
+                "Platform-API compose_hash: {} (no allowed list configured)",
                 compose_hash
             );
 
@@ -133,7 +133,7 @@ impl PlatformVerifier {
             if let Some(last_hash) = &self.last_verified_commit {
                 if last_hash != compose_hash {
                     warn!(
-                        "⚠️  Compose hash changed from {} to {}",
+                        "WARNING: Compose hash changed from {} to {}",
                         last_hash, compose_hash
                     );
                 }

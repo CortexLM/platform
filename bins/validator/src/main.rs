@@ -12,6 +12,7 @@ mod challenge_ws;
 mod config;
 mod cvm_quota;
 mod dstack_provisioner;
+mod env_prompt;
 mod epoch_manager;
 mod executor;
 mod hotkey;
@@ -83,13 +84,14 @@ async fn main() -> Result<()> {
 
     // Initialize VMM client
     let vmm_url = config.dstack_vmm_url.clone();
-    let vmm_client = Arc::new(crate::vmm_client::VmmClient::new(vmm_url.clone()));
+    // Note: vmm_client is created inside ChallengeManager, not needed here
 
     // Initialize challenge manager
     let challenge_manager = Arc::new(ChallengeManager::new(
         client.clone(),
         vmm_url.clone(),
         cvm_quota_manager.clone(),
+        dynamic_values_manager.clone(),
     ));
 
     // Initialize chain components (stub for now - will be fully integrated later)

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use base64;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 use futures_util::{SinkExt, StreamExt};
@@ -202,13 +202,50 @@ impl ChallengeWsClient {
         let val_public = PublicKey::from(&val_secret);
         let val_pub_b64 = base64::encode(val_public.as_bytes());
 
-        // Send attestation_begin
-        let begin = serde_json::json!({
+        // Get TDX quote for validator (mutual attestation)
+        // Calculate report_data from nonce for quote binding
+        let mut hasher = Sha256::new();
+        hasher.update(&nonce_bytes);
+        let report_data = hasher.finalize()[..32].to_vec();
+        
+        // Try to get validator TDX quote (if running in TDX CVM)
+        let validator_quote = match self.get_validator_quote(&report_data).await {
+            Ok(quote) => {
+                info!("Got validator TDX quote for mutual attestation");
+                Some(quote)
+            }
+            Err(e) => {
+                // Check if we're in dev/mock mode
+                let mock_vmm = std::env::var("VALIDATOR_MOCK_VMM")
+                    .unwrap_or_else(|_| "false".to_string()) == "true";
+                
+                if mock_vmm {
+                    warn!("MOCK VMM MODE: Cannot get validator TDX quote, using mock quote structure");
+                    // In mock mode, create a mock quote structure (will be validated structurally)
+                    Some(self.create_mock_quote(&report_data))
+                } else {
+                    // In production without quote, fail fast
+                    error!("Security error: Cannot get validator TDX quote in production mode: {}", e);
+                    return Err(anyhow!("Validator TDX quote required for mutual attestation. Error: {}", e));
+                }
+            }
+        };
+
+        // Send attestation_begin with validator quote (mutual attestation)
+        let mut begin = serde_json::json!({
             "type": "attestation_begin",
             "nonce": nonce_hex,
             "validator_hotkey": self.validator_hotkey,
             "val_x25519_pub": val_pub_b64,
         });
+        
+        // Include validator quote if available
+        if let Some(quote_data) = validator_quote {
+            begin["val_quote"] = serde_json::json!(quote_data.quote_b64);
+            begin["val_event_log"] = serde_json::json!(quote_data.event_log);
+            begin["val_rtmrs"] = serde_json::json!(quote_data.rtmrs);
+        }
+        
         write.send(Message::Text(begin.to_string())).await?;
 
         // Expect attestation_response
@@ -245,11 +282,12 @@ impl ChallengeWsClient {
                             .get("chal_x25519_pub")
                             .and_then(|q| q.as_str())
                             .ok_or_else(|| anyhow!("missing chal_x25519_pub"))?;
+                        let event_log = v.get("event_log").and_then(|e| e.as_str());
 
                         // Verify TDX quote and nonce binding
                         match self.verify_tdx_quote(quote_b64, &nonce_bytes).await {
                             Ok(_) => {
-                                info!("TDX verification successful");
+                                info!("TDX quote structure and signature verified");
                             }
                             Err(e) => {
                                 error!("TDX verification failed: {}", e);
@@ -264,6 +302,20 @@ impl ChallengeWsClient {
                                 write.send(Message::Text(reject.to_string())).await?;
                                 return Err(anyhow!("TDX verification failed: {}", e));
                             }
+                        }
+                        
+                        // Verify environment mode isolation (dev/prod)
+                        if let Some(env_err) = self.verify_environment_match(event_log).await {
+                            error!("Environment verification failed: {}", env_err);
+                            conn_state = ConnectionState::Rejected {
+                                reason: format!("Environment mismatch: {}", env_err),
+                            };
+                            let reject = serde_json::json!({
+                                "type": "attestation_reject",
+                                "reason": format!("Environment mismatch: {}", env_err),
+                            });
+                            write.send(Message::Text(reject.to_string())).await?;
+                            return Err(anyhow!("Environment verification failed: {}", env_err));
                         }
 
                         // Compute shared secret
@@ -456,6 +508,7 @@ impl ChallengeWsClient {
         let mut hasher = Sha256::new();
         hasher.update(nonce_bytes);
         let expected = hasher.finalize();
+        let expected_slice: &[u8] = expected.as_ref();
 
         // TDX report_data location can vary slightly between quote versions.
         // Try common offsets and accept a match against SHA256(nonce).
@@ -465,7 +518,7 @@ impl ChallengeWsClient {
         for off in candidate_offsets.iter() {
             if quote_bytes.len() >= off + 32 {
                 let rd = &quote_bytes[*off..*off + 32];
-                if rd == expected.as_slice() {
+                if rd == expected_slice {
                     matched = true;
                     matched_off = Some(*off);
                     break;
@@ -481,4 +534,135 @@ impl ChallengeWsClient {
 
         Ok(())
     }
+    
+    /// Verify environment mode match between validator and challenge
+    async fn verify_environment_match(&self, challenge_event_log: Option<&str>) -> Option<String> {
+        // Get validator environment mode
+        let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
+            // Auto-detect from VALIDATOR_MOCK_VMM
+            if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true" {
+                "dev".to_string()
+            } else {
+                "prod".to_string()
+            }
+        });
+        
+        // Extract challenge environment mode from event_log
+        if let Some(event_log_str) = challenge_event_log {
+            if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(event_log_str) {
+                if let Some(challenge_env_mode) = event_log_json.get("environment_mode")
+                    .and_then(|v| v.as_str())
+                {
+                    // Verify environment match (dev cannot connect to prod and vice versa)
+                    if challenge_env_mode != validator_env_mode {
+                        return Some(format!(
+                            "Challenge environment is '{}' but validator environment is '{}'. Dev and prod environments cannot communicate.",
+                            challenge_env_mode, validator_env_mode
+                        ));
+                    }
+                } else if let Some(dev_mode) = event_log_json.get("dev_mode")
+                    .and_then(|v| v.as_bool())
+                {
+                    // Fallback: check dev_mode flag
+                    let challenge_env = if dev_mode { "dev" } else { "prod" };
+                    if challenge_env != validator_env_mode {
+                        return Some(format!(
+                            "Challenge environment is '{}' (from dev_mode flag) but validator environment is '{}'. Dev and prod environments cannot communicate.",
+                            challenge_env, validator_env_mode
+                        ));
+                    }
+                }
+            }
+        }
+        
+        None // Environment match verified or could not determine (non-blocking)
+    }
+    
+    /// Get validator TDX quote from dstack (if running in TDX CVM)
+    async fn get_validator_quote(&self, report_data: &[u8]) -> Result<ValidatorQuoteData> {
+        use dstack_sdk::dstack_client::DstackClient;
+        
+        let dstack_client = DstackClient::new(None); // Uses /var/run/dstack.sock by default
+        
+        let quote_response = dstack_client.get_quote(report_data.to_vec()).await
+            .context("Failed to get validator TDX quote from dstack")?;
+        
+        // Get environment mode and add to event_log for isolation
+        let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
+            if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true" {
+                "dev".to_string()
+            } else {
+                "prod".to_string()
+            }
+        });
+        
+        // Add environment_mode to event_log
+        let mut event_log = quote_response.event_log;
+        if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(&event_log) {
+            let mut event_log_dict = event_log_json.as_object().cloned().unwrap_or_default();
+            event_log_dict.insert("environment_mode".to_string(), serde_json::Value::String(validator_env_mode));
+            event_log = serde_json::to_string(&event_log_dict)
+                .unwrap_or_else(|_| quote_response.event_log.clone());
+        } else {
+            // If event_log is not JSON, create new JSON with environment_mode
+            event_log = serde_json::json!({
+                "environment_mode": validator_env_mode,
+                "original": quote_response.event_log,
+            }).to_string();
+        }
+        
+        Ok(ValidatorQuoteData {
+            quote_b64: base64::encode(quote_response.quote),
+            event_log,
+            rtmrs: quote_response.replay_rtmrs(),
+        })
+    }
+    
+    /// Create a mock quote structure for dev/mock mode
+    /// The structure is valid but not cryptographically verified
+    fn create_mock_quote(&self, report_data: &[u8]) -> ValidatorQuoteData {
+        use rand::RngCore;
+        
+        // Get environment mode for isolation
+        let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
+            if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true" {
+                "dev".to_string()
+            } else {
+                "prod".to_string()
+            }
+        });
+        
+        // Create a mock quote with correct size (1024 bytes minimum for TDX quotes)
+        let mut mock_quote = vec![0u8; 1024];
+        rand::thread_rng().fill_bytes(&mut mock_quote);
+        
+        // Embed report_data at a known offset (for structural validation)
+        // Offset 568 is a common location for report_data in TDX quotes
+        let report_offset = 568;
+        if mock_quote.len() >= report_offset + 32 {
+            mock_quote[report_offset..report_offset + 32].copy_from_slice(report_data);
+        }
+        
+        ValidatorQuoteData {
+            quote_b64: base64::encode(mock_quote),
+            event_log: serde_json::json!({
+                "dev_mode": true,
+                "environment_mode": validator_env_mode,
+            }).to_string(),
+            rtmrs: vec![
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+        }
+    }
+}
+
+/// Validator quote data for mutual attestation
+#[derive(Debug, Clone)]
+struct ValidatorQuoteData {
+    quote_b64: String,
+    event_log: String,
+    rtmrs: Vec<String>,
 }

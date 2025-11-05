@@ -1,10 +1,12 @@
 use crate::challenge_ws::ChallengeWsClient;
 use crate::cvm_quota::CVMQuotaManager;
+use crate::env_prompt::get_or_prompt_env_vars;
 use crate::vmm_client::{PortMapping, VmConfiguration, VmmClient};
 use anyhow::{Context, Result};
 use base64;
 use chrono::{DateTime, Utc};
 use platform_engine_api_client::PlatformClient;
+use platform_engine_dynamic_values::DynamicValuesManager;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -131,6 +133,7 @@ pub struct ChallengeManager {
     quota_manager: Arc<CVMQuotaManager>,
     validator_base_url: String, // URL for challenge CVMs to connect to validator
     gateway_url: Option<String>, // Gateway URL for CVM-to-CVM communication
+    dynamic_values: Arc<DynamicValuesManager>, // For storing private environment variables
 }
 
 impl ChallengeManager {
@@ -138,6 +141,7 @@ impl ChallengeManager {
         client: PlatformClient,
         vmm_url: String,
         quota_manager: Arc<CVMQuotaManager>,
+        dynamic_values: Arc<DynamicValuesManager>,
     ) -> Self {
         // Get validator base URL from environment or use default
         let validator_base_url = std::env::var("VALIDATOR_BASE_URL")
@@ -153,6 +157,7 @@ impl ChallengeManager {
             quota_manager,
             validator_base_url,
             gateway_url: None, // Will be populated from VMM metadata
+            dynamic_values,
         }
     }
 
@@ -762,6 +767,32 @@ impl ChallengeManager {
             // No port forwarding needed - gateway handles routing via instance_id
             let ports = vec![];
 
+            // Get or prompt for private environment variables
+            // Pass github_repo to load platform.toml
+            let private_env_vars = get_or_prompt_env_vars(
+                &self.dynamic_values,
+                &compose_hash_clone,
+                &spec.name,
+                spec.github_repo.as_ref(),
+            )
+            .await
+            .context("Failed to get or prompt for private environment variables")?;
+
+            // Convert env vars to encrypted_env format (Vec<u8> as JSON)
+            // Serialize as JSON array of "KEY=VALUE" strings
+            let env_var_strings: Vec<String> = private_env_vars
+                .iter()
+                .map(|(key, value)| format!("{}={}", key, value))
+                .collect();
+            let encrypted_env = serde_json::to_vec(&env_var_strings)
+                .context("Failed to serialize environment variables as JSON")?;
+
+            info!(
+                "Prepared {} private environment variables for challenge {}",
+                private_env_vars.len(),
+                compose_hash_clone
+            );
+
             // Check if CVM with this compose_hash already exists
             let existing_vm = self.vmm_client.list_vms().await.ok().and_then(|vms| {
                 vms.iter()
@@ -793,9 +824,9 @@ impl ChallengeManager {
                         .transpose()?
                         .unwrap_or(20),
                     ports,
-                    encrypted_env: vec![], // Empty encrypted env by default
-                    app_id: None,          // No app_id for new challenges
-                    user_config,           // Empty user config - WS is validator-initiated
+                    encrypted_env, // Private environment variables from validator DB
+                    app_id: None,  // No app_id for new challenges
+                    user_config,   // Empty user config - WS is validator-initiated
                     hugepages: dstack_config.map(|c| c.hugepages).unwrap_or(false),
                     pin_numa: dstack_config.map(|c| c.pin_numa).unwrap_or(false),
                     gpus: None,           // No GPU by default
@@ -1183,7 +1214,7 @@ impl ChallengeManager {
 
 fn forward_heartbeat(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let client = reqwest::blocking::Client::new();
     let _ = client
         .post(format!("{}/results/heartbeat", platform_api_url))
@@ -1194,7 +1225,7 @@ fn forward_heartbeat(payload: serde_json::Value) -> Result<()> {
 
 fn forward_logs(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let client = reqwest::blocking::Client::new();
     let _ = client
         .post(format!("{}/results/logs", platform_api_url))
@@ -1205,7 +1236,7 @@ fn forward_logs(payload: serde_json::Value) -> Result<()> {
 
 fn forward_submit(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
-        .unwrap_or_else(|_| "http://platform-api:8080".to_string());
+        .unwrap_or_else(|_| "http://platform-api:3000".to_string());
     let client = reqwest::blocking::Client::new();
     let _ = client
         .post(format!("{}/results/submit", platform_api_url))
