@@ -4,40 +4,40 @@ services:
   validator:
     image: platform-validator:latest
     ports:
-      # Port mapping pour le validator CVM
+      # Port mapping for validator CVM
       # - host_port:vm_port (18080:18080)
-      # Access depuis le host: http://127.0.0.1:18080
-      # Access depuis d'autres CVMs: http://10.0.2.2:18080
+      # Access from host: http://127.0.0.1:18080
+      # Access from other CVMs: http://10.0.2.2:18080
       - '18080:18080'
     environment:
-      # Passphrase mnémonique (12 mots) pour générer la hotkey
+      # Mnemonic passphrase (12 words) to generate the hotkey
       - HOTKEY_PASSPHRASE=${HOTKEY_PASSPHRASE}
       
-      # API Platform
+      # Platform API
       - PLATFORM_BASE_API=${PLATFORM_BASE_API:-http://platform-api:3000}
       
-      # URL du VMM pour créer des CVMs (depuis un CVM, utiliser le gateway host)
+      # VMM URL to create CVMs (from a CVM, use the gateway host)
       - DSTACK_VMM_URL=${DSTACK_VMM_URL:-http://10.0.2.2:11530}
       
-      # URL que les challenge CVMs utiliseront pour se connecter
+      # URL that challenge CVMs will use to connect
       - VALIDATOR_BASE_URL=${VALIDATOR_BASE_URL:-http://10.0.2.2:18080}
       
-      # Port sur lequel le validator écoute dans le CVM
+      # Port on which the validator listens in the CVM
       - VALIDATOR_PORT=18080
       
-      # Configuration des ressources CVM
+      # CVM resource configuration
       - VALIDATOR_CPU_CORES=${VALIDATOR_CPU_CORES:-4}
       - VALIDATOR_MEMORY_MB=${VALIDATOR_MEMORY_MB:-2048}
       - VALIDATOR_DISK_MB=${VALIDATOR_DISK_MB:-10240}
       - VALIDATOR_GPU_COUNT=${VALIDATOR_GPU_COUNT:-0}
     volumes:
-      # Configuration du validator
+      # Validator configuration
       - ./config.toml:/app/config.toml:ro
       
-      # Données persistantes (base de données, etc.)
+      # Persistent data (database, etc.)
       - ./data:/data
       
-      # Socket dstack pour la communication avec le guest agent
+      # Dstack socket for communication with guest agent
       - /var/run/dstack.sock:/var/run/dstack.sock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18080/health"]

@@ -846,12 +846,14 @@ async fn attest(
         let event_log = attestation.get("event_log");
         let rtmrs = attestation.get("rtmrs");
 
-        if quote.is_none() || nonce.is_none() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        let quote_b64 = quote.unwrap();
-        let nonce_str = nonce.unwrap();
+        let quote_b64 = match quote {
+            Some(q) => q,
+            None => return Err(StatusCode::BAD_REQUEST),
+        };
+        let nonce_str = match nonce {
+            Some(n) => n,
+            None => return Err(StatusCode::BAD_REQUEST),
+        };
 
         // Decode quote from base64
         let quote_bytes = base64::decode(quote_b64).map_err(|_| StatusCode::BAD_REQUEST)?;

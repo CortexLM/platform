@@ -1,28 +1,28 @@
 # Examples
 
-## Commandes de base
+## Basic commands
 
-### Lister les dynamic values
+### List dynamic values
 
 ```bash
 pv dynamic list --challenge-id website-challenge
 ```
 
-### Définir une valeur
+### Set a value
 
 ```bash
 pv dynamic set --challenge-id website-challenge --key resources.cpu_cores --value 8
 ```
 
-### Télécharger et installer un challenge
+### Download and install a challenge
 
 ```bash
 pv challenge install --repo-url https://github.com/platform-network/website-challenge.git
 ```
 
-## Installation interactive complète
+## Complete interactive installation
 
-Quand un challenge a `interactiveInstallation` configuré, l'installation devient interactive:
+When a challenge has `interactiveInstallation` configured, the installation becomes interactive:
 
 ```bash
 $ pv challenge install --repo-url https://github.com/user/challenge.git
@@ -58,9 +58,9 @@ Enter value for 'resources.disk_mb' (default: 10240): [Enter]
   Commit: abc123...
 ```
 
-## Validation d'entrée
+## Input validation
 
-Si une validation échoue, le CLI demande de réessayer:
+If validation fails, the CLI prompts to retry:
 
 ```bash
 📝 Number of CPU cores available for challenge execution
@@ -71,7 +71,7 @@ Enter value for 'resources.cpu_cores' (default: 4): 8
 ✓ Set resources.cpu_cores = 8
 ```
 
-## Validation d'un challenge
+## Challenge validation
 
 ```bash
 $ pv challenge validate --challenge-dir ./challenges/website-challenge
@@ -84,25 +84,25 @@ $ pv challenge validate --challenge-dir ./challenges/website-challenge
   Interactive installation: 3 required values
 ```
 
-## Gestion manuelle des valeurs
+## Manual value management
 
-Après installation, vous pouvez modifier les valeurs:
+After installation, you can modify values:
 
 ```bash
-# Voir toutes les valeurs
+# View all values
 pv dynamic list --challenge-id website-challenge
 
-# Modifier une valeur
+# Modify a value
 pv dynamic set --challenge-id website-challenge --key resources.cpu_cores --value 16
 
-# Vérifier la modification
+# Verify the modification
 pv dynamic get --challenge-id website-challenge --key resources.cpu_cores
 
-# Supprimer une valeur (retour à la valeur par défaut)
+# Delete a value (return to default)
 pv dynamic delete --challenge-id website-challenge --key resources.cpu_cores
 ```
 
-## Installation depuis un commit spécifique
+## Installation from a specific commit
 
 ```bash
 pv challenge install \
@@ -110,7 +110,7 @@ pv challenge install \
   --ref-name abc123def456789
 ```
 
-## Installation dans un dossier personnalisé
+## Installation in a custom directory
 
 ```bash
 pv challenge install \

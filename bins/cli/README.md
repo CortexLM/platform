@@ -1,6 +1,6 @@
 # Platform Validator CLI
 
-CLI pour gérer les dynamic values et installer des challenges dans le platform validator.
+CLI to manage dynamic values and install challenges in the platform validator.
 
 ## Installation
 
@@ -8,37 +8,37 @@ CLI pour gérer les dynamic values et installer des challenges dans le platform 
 cargo build --release --bin pv
 ```
 
-Le binaire sera disponible dans `target/release/pv`.
+The binary will be available in `target/release/pv`.
 
-## Commandes
+## Commands
 
 ### Dynamic Values
 
-Gérer les dynamic values d'un challenge.
+Manage dynamic values for a challenge.
 
 #### Set
-Définir une dynamic value pour un challenge:
+Set a dynamic value for a challenge:
 
 ```bash
 pv dynamic set --challenge-id website-challenge --key resources.cpu_cores --value 8
 ```
 
 #### Get
-Récupérer une dynamic value:
+Retrieve a dynamic value:
 
 ```bash
 pv dynamic get --challenge-id website-challenge --key resources.cpu_cores
 ```
 
 #### List
-Lister toutes les dynamic values d'un challenge:
+List all dynamic values for a challenge:
 
 ```bash
 pv dynamic list --challenge-id website-challenge
 ```
 
 #### Delete
-Supprimer une dynamic value:
+Delete a dynamic value:
 
 ```bash
 pv dynamic delete --challenge-id website-challenge --key resources.cpu_cores
@@ -47,27 +47,27 @@ pv dynamic delete --challenge-id website-challenge --key resources.cpu_cores
 ### Challenge Installation
 
 #### Install
-Installer un challenge depuis un dépôt Git:
+Install a challenge from a Git repository:
 
 ```bash
 pv challenge install --repo-url https://github.com/user/challenge-repo.git --ref-name main
 ```
 
 Options:
-- `--repo-url`: URL du dépôt Git
-- `--ref-name`: Branch ou commit hash (défaut: main)
-- `--install-dir`: Dossier d'installation (défaut: ./challenges)
-- `--validator-url`: URL du validator (défaut: http://localhost:3030)
+- `--repo-url`: Git repository URL
+- `--ref-name`: Branch or commit hash (default: main)
+- `--install-dir`: Installation directory (default: ./challenges)
+- `--validator-url`: Validator URL (default: http://localhost:3030)
 
-Le CLI va:
-1. Cloner le dépôt
-2. Checkouter le commit spécifié
-3. Charger et afficher le `platform.json`
-4. Si `interactiveInstallation` est présent, demander les valeurs requises
-5. Copier le challenge dans le dossier d'installation
+The CLI will:
+1. Clone the repository
+2. Checkout the specified commit
+3. Load and display the `platform.json`
+4. If `interactiveInstallation` is present, prompt for required values
+5. Copy the challenge to the installation directory
 
 #### Validate
-Valider une installation de challenge:
+Validate a challenge installation:
 
 ```bash
 pv challenge validate --challenge-dir ./challenges/website-challenge
@@ -75,9 +75,9 @@ pv challenge validate --challenge-dir ./challenges/website-challenge
 
 ## Interactive Installation
 
-Le CLI supporte l'installation interactive de challenges qui requièrent des valeurs de configuration spécifiques au validateur.
+The CLI supports interactive installation of challenges that require validator-specific configuration values.
 
-### Configuration dans platform.json
+### Configuration in platform.json
 
 ```json
 {
@@ -98,41 +98,41 @@ Le CLI supporte l'installation interactive de challenges qui requièrent des val
 }
 ```
 
-### Types de validation
+### Validation types
 
-- **number**: Valeur numérique avec optionnellement `min` et `max`
-- **string**: Chaîne de caractères avec optionnellement un `pattern` regex
-- **boolean**: Valeur booléenne (true/false)
+- **number**: Numeric value with optional `min` and `max`
+- **string**: String value with optional `pattern` regex
+- **boolean**: Boolean value (true/false)
 
-## Exemples
+## Examples
 
-### Installation complète d'un challenge
+### Complete challenge installation
 
 ```bash
-# Cloner et installer avec configuration interactive
+# Clone and install with interactive configuration
 pv challenge install --repo-url https://github.com/user/challenge.git
 
-# Le CLI va demander les valeurs requises si interactiveInstallation est défini
-# Puis il télécharge le challenge et configure les dynamic values
+# The CLI will prompt for required values if interactiveInstallation is defined
+# Then it downloads the challenge and configures the dynamic values
 ```
 
-### Modifier manuellement les ressources
+### Manually modify resources
 
 ```bash
-# Voir les valeurs actuelles
+# View current values
 pv dynamic list --challenge-id website-challenge
 
-# Modifier le nombre de CPU
+# Modify CPU count
 pv dynamic set --challenge-id website-challenge --key resources.cpu_cores --value 8
 
-# Modifier la mémoire
+# Modify memory
 pv dynamic set --challenge-id website-challenge --key resources.memory_mb --value 16384
 ```
 
-## Intégration avec le Validator
+## Integration with Validator
 
-Le CLI communique avec le serveur HTTP du validator (port 3030 par défaut). Assurez-vous que le validator est démarré avant d'utiliser le CLI.
+The CLI communicates with the validator HTTP server (port 3030 by default). Make sure the validator is started before using the CLI.
 
-## Sécurité
+## Security
 
-Les dynamic values validator sont stockées localement dans une base SQLite et ne peuvent être modifiées que via le CLI ou l'API HTTP du validator. Les dynamic values globales restent contrôlées par l'API de la plateforme.
+Validator dynamic values are stored locally in a SQLite database and can only be modified via the CLI or the validator HTTP API. Global dynamic values remain controlled by the platform API.
