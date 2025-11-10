@@ -70,12 +70,15 @@ impl VmmClient {
     pub fn new(vmm_url: String) -> Self {
         let mock_mode = std::env::var("VALIDATOR_MOCK_VMM")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
-        
+            .to_lowercase()
+            == "true";
+
         if mock_mode {
-            tracing::warn!("🔧 MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)");
+            tracing::warn!(
+                "🔧 MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)"
+            );
         }
-        
+
         Self {
             vmm_url,
             client: Client::new(),
@@ -87,7 +90,10 @@ impl VmmClient {
     pub async fn create_vm(&self, config: VmConfiguration) -> Result<String> {
         if self.mock_mode {
             // Mock mode: return fake VM ID without actually creating a VM
-            let vm_id = format!("mock-vm-{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+            let vm_id = format!(
+                "mock-vm-{}",
+                Uuid::new_v4().to_string().split('-').next().unwrap()
+            );
             info!("🔧 MOCK VMM: Created fake VM {} for {}", vm_id, config.name);
             return Ok(vm_id);
         }

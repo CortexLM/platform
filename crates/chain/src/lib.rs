@@ -1,3 +1,4 @@
+mod bittensor_client;
 pub mod block_sync;
 pub mod client;
 pub mod commit_weights;
@@ -21,6 +22,7 @@ pub use types::*;
 pub use weights::*;
 
 // Re-export specific items from client to avoid conflicts
+pub use bittensor_client::BittensorChainClient;
 pub use client::{
     ChainClientHealth, ChainClientHealthChecker, ChainClientManager, ChainClientMetrics,
     MockChainClient,

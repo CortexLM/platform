@@ -229,8 +229,12 @@ impl DynamicValuesManager {
         value: &str,
     ) -> Result<()> {
         let prefixed_key = format!("env_private:{}", key);
-        self.set_value(challenge_id, &prefixed_key, serde_json::Value::String(value.to_string()))
-            .await
+        self.set_value(
+            challenge_id,
+            &prefixed_key,
+            serde_json::Value::String(value.to_string()),
+        )
+        .await
     }
 
     /// Get a private environment variable for a challenge
@@ -260,7 +264,7 @@ impl DynamicValuesManager {
         let result = tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn.prepare(
-                "SELECT key, value FROM dynamic_values WHERE challenge_id = ?1 AND key LIKE ?2"
+                "SELECT key, value FROM dynamic_values WHERE challenge_id = ?1 AND key LIKE ?2",
             )?;
 
             let search_pattern = format!("{}%", prefix);
@@ -280,7 +284,10 @@ impl DynamicValuesManager {
                         }
                         _ => {
                             // If not a string, skip it
-                            tracing::warn!("Private env var {} has non-string value, skipping", key);
+                            tracing::warn!(
+                                "Private env var {} has non-string value, skipping",
+                                key
+                            );
                         }
                     }
                 }

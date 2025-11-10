@@ -2,6 +2,7 @@
 use crate::{ChallengeAdapter, HarnessBundle, SubmissionBundle, EvalResult, EngineConfig, EngineResult, EngineError};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
@@ -13,7 +14,7 @@ pub struct Evaluator {
 }
 
 /// Evaluator metrics
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EvaluatorMetrics {
     pub total_evaluations: u64,
     pub successful_evaluations: u64,
@@ -117,7 +118,7 @@ impl Evaluator {
 
 /// Batch evaluator for multiple submissions
 pub struct BatchEvaluator {
-    evaluator: Arc<Evaluator>,
+    evaluator: Arc<RwLock<Evaluator>>,
     max_concurrent: u32,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
@@ -125,37 +126,39 @@ pub struct BatchEvaluator {
 impl BatchEvaluator {
     pub fn new(config: EngineConfig, max_concurrent: u32) -> Self {
         Self {
-            evaluator: Arc::new(Evaluator::new(config)),
+            evaluator: Arc::new(RwLock::new(Evaluator::new(config))),
             max_concurrent,
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent as usize)),
         }
     }
 
     /// Register a challenge adapter
-    pub fn register_adapter(&self, _name: String, _adapter: Box<dyn ChallengeAdapter>) {
-        // Note: Arc<Evaluator> doesn't allow mutable access
-        // This would need to be redesigned to use interior mutability
-        tracing::warn!("Adapter registration not supported with Arc<Evaluator>");
+    pub async fn register_adapter(&self, name: String, adapter: Box<dyn ChallengeAdapter>) {
+        let mut evaluator = self.evaluator.write().await;
+        evaluator.register_adapter(name, adapter);
     }
 
     /// Evaluate multiple submissions concurrently
     pub async fn evaluate_batch(
-        &mut self,
+        &self,
         harness: &HarnessBundle,
         submissions: Vec<SubmissionBundle>,
     ) -> EngineResult<Vec<EvalResult>> {
         let mut handles = Vec::new();
         
-        for _submission in submissions {
-            let _harness = harness.clone();
+        for submission in submissions {
+            let harness = harness.clone();
             let semaphore = self.semaphore.clone();
-            let _evaluator = self.evaluator.clone();
+            let evaluator = self.evaluator.clone();
             
             let handle = tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                // Note: Arc<Evaluator> doesn't allow mutable access
-                // This would need to be redesigned to use interior mutability
-                Err(anyhow::anyhow!("Evaluation not supported with Arc<Evaluator>"))
+                
+                // Get write lock for evaluation
+                let mut eval_guard = evaluator.write().await;
+                let result = eval_guard.evaluate(&harness, &submission).await;
+                
+                result
             });
             
             handles.push(handle);
@@ -165,15 +168,16 @@ impl BatchEvaluator {
         for handle in handles {
             let result = handle.await
                 .map_err(|e| crate::EngineError::AdapterError(format!("Task failed: {}", e)))?;
-            results.push(result.map_err(|e| EngineError::AdapterError(e.to_string()))?);
+            results.push(result?);
         }
         
         Ok(results)
     }
 
     /// Get evaluator metrics
-    pub fn get_metrics(&self) -> &EvaluatorMetrics {
-        self.evaluator.get_metrics()
+    pub async fn get_metrics(&self) -> EvaluatorMetrics {
+        let evaluator = self.evaluator.read().await;
+        evaluator.get_metrics().clone()
     }
 }
 
