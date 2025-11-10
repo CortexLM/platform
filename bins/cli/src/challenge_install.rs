@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Parser};
 use git2::Repository;
 use regex::Regex;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use toml;
 
 #[derive(Parser)]
 pub struct ChallengeInstallCmd {
@@ -39,6 +40,14 @@ struct InstallArgs {
     /// Validator URL
     #[arg(long, default_value = "http://localhost:3030")]
     validator_url: String,
+
+    /// Platform API URL (for storing environment variables)
+    #[arg(long, default_value = "http://localhost:8000")]
+    platform_api_url: String,
+
+    /// Compose hash of the challenge (required for storing env vars)
+    #[arg(long)]
+    compose_hash: Option<String>,
 }
 
 #[derive(Args)]
@@ -86,6 +95,32 @@ struct ValidationConfig {
     min: Option<f64>,
     #[serde(default)]
     max: Option<f64>,
+}
+
+/// Platform.toml structure for validator configuration
+#[derive(Debug, Deserialize, Serialize)]
+struct PlatformToml {
+    #[serde(default)]
+    validator: Option<ValidatorConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ValidatorConfig {
+    /// Required private environment variables
+    #[serde(default)]
+    required_env_vars: Vec<EnvVarConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EnvVarConfig {
+    /// Environment variable name (e.g., "OPENAI_API_KEY")
+    name: String,
+    /// Description for the prompt
+    #[serde(default)]
+    description: Option<String>,
+    /// Whether this env var is optional
+    #[serde(default)]
+    optional: bool,
 }
 
 impl ChallengeInstallCmd {
@@ -161,6 +196,27 @@ impl ChallengeInstallCmd {
                 &args.validator_url,
             )
             .await?;
+        }
+
+        // Handle environment variables from platform.toml
+        let platform_toml_path = temp_dir.join("platform.toml");
+        if platform_toml_path.exists() {
+            println!("\n🔐 Environment Variables Configuration");
+            if let Some(compose_hash) = &args.compose_hash {
+                if let Err(e) = self.handle_platform_toml_env_vars(
+                    &platform_toml_path,
+                    compose_hash,
+                    &args.platform_api_url,
+                )
+                .await
+                {
+                    eprintln!("⚠️  Warning: Failed to handle environment variables: {}", e);
+                    eprintln!("   Challenge will be installed but env vars may need to be configured manually");
+                }
+            } else {
+                println!("⚠️  Warning: platform.toml found but --compose-hash not provided");
+                println!("   Environment variables will not be stored. Provide --compose-hash to store them.");
+            }
         }
 
         // Copy to installation directory
@@ -337,6 +393,101 @@ impl ChallengeInstallCmd {
                 "  Interactive installation: {} required values",
                 installation.required_validator_values.len()
             );
+        }
+
+        Ok(())
+    }
+
+    /// Handle environment variables from platform.toml
+    async fn handle_platform_toml_env_vars(
+        &self,
+        platform_toml_path: &Path,
+        compose_hash: &str,
+        platform_api_url: &str,
+    ) -> Result<()> {
+        use inquire::{Password, Text};
+
+        // Read and parse platform.toml
+        let toml_content = std::fs::read_to_string(platform_toml_path)
+            .context("Failed to read platform.toml")?;
+        let platform_toml: PlatformToml = toml::from_str(&toml_content)
+            .context("Failed to parse platform.toml")?;
+
+        // Extract required env vars
+        let required_env_vars = if let Some(validator_config) = platform_toml.validator {
+            validator_config.required_env_vars
+        } else {
+            println!("  No [validator] section found in platform.toml");
+            return Ok(());
+        };
+
+        if required_env_vars.is_empty() {
+            println!("  No required environment variables found in platform.toml");
+            return Ok(());
+        }
+
+        println!("  Found {} required environment variable(s)", required_env_vars.len());
+
+        let mut env_vars = HashMap::new();
+
+        // Prompt for each required env var
+        for env_config in &required_env_vars {
+            let description = env_config
+                .description
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Value for {}", env_config.name));
+
+            println!("\n📝 {}", description);
+
+            // Use Password input for sensitive values (common patterns)
+            let is_sensitive = env_config.name.to_uppercase().contains("KEY")
+                || env_config.name.to_uppercase().contains("TOKEN")
+                || env_config.name.to_uppercase().contains("SECRET")
+                || env_config.name.to_uppercase().contains("PASSWORD");
+
+            let value = if is_sensitive {
+                Password::new(&format!("Enter value for '{}'", env_config.name))
+                    .with_display_mode(inquire::PasswordDisplayMode::Hidden)
+                    .prompt()?
+            } else {
+                Text::new(&format!("Enter value for '{}'", env_config.name))
+                    .prompt()?
+            };
+
+            if value.is_empty() {
+                if env_config.optional {
+                    println!("  Skipping optional variable: {}", env_config.name);
+                    continue;
+                } else {
+                    anyhow::bail!("Value for '{}' cannot be empty", env_config.name);
+                }
+            }
+
+            env_vars.insert(env_config.name.clone(), value);
+        }
+
+        // Store env vars via platform-api
+        if !env_vars.is_empty() {
+            let client = reqwest::Client::new();
+            let url = format!("{}/challenges/{}/env-vars", platform_api_url, compose_hash);
+
+            let response = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "env_vars": env_vars
+                }))
+                .send()
+                .await
+                .context("Failed to send environment variables to platform-api")?;
+
+            if response.status().is_success() {
+                println!("\n✓ Successfully stored {} environment variable(s)", env_vars.len());
+            } else {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                anyhow::bail!("Failed to store environment variables: {} - {}", status, error_text);
+            }
         }
 
         Ok(())

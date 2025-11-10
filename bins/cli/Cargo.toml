@@ -37,6 +37,9 @@ walkdir = { workspace = true }
 inquire = "0.7"
 regex = "1"
 
+# TOML parsing
+toml = "0.8"
+
 # Path handling
 url = { workspace = true }
 
