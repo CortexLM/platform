@@ -1,5 +1,5 @@
 use crate::types::{
-    ChainClient, ChainMetadata, SubnetInfo, ValidatorInfo, ValidatorSet, WeightSubmission,
+    ChainClient, ChainMetadata, SubnetInfo, ValidatorSet, WeightSubmission,
     WeightSubmissionResult,
 };
 use async_trait::async_trait;

@@ -1,5 +1,7 @@
 mod bittensor_client;
 pub mod block_sync;
+pub mod blockchain_monitor;
+pub mod blockchain_monitor_metrics;
 pub mod client;
 pub mod commit_weights;
 pub mod error;
@@ -10,6 +12,8 @@ pub mod types;
 pub mod weights;
 
 pub use block_sync::{BlockSyncManager, MetagraphSyncManager, SyncBlockInfo};
+pub use blockchain_monitor::{BlockchainMonitor, NetworkHyperparameters};
+pub use blockchain_monitor_metrics::{WeightSyncMetrics, WeightSyncMetricsCollector};
 pub use commit_weights::{CommitWeightsConfig, CommitWeightsService};
 pub use error::*;
 pub use hotkey_mapper::HotkeyMapper;

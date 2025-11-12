@@ -28,6 +28,26 @@ pub enum WeightSubmissionError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    /// Weights already set for this epoch - should skip and wait for next epoch
+    #[error("Weights already set for this epoch")]
+    WeightAlreadySet,
+
+    /// Too many unrevealed commits - need to reveal pending commits first
+    #[error("Too many unrevealed commits: {0}")]
+    TooManyUnrevealedCommits(u32),
+
+    /// Committing weights too fast - rate limit exceeded
+    #[error("Committing weights too fast. Rate limit: {0} blocks, elapsed: {1} blocks")]
+    CommittingWeightsTooFast(u64, u64),
+
+    /// Rate limit exceeded - need to wait
+    #[error("Rate limit exceeded. Need to wait {0} more blocks")]
+    RateLimitExceeded(u64),
+
+    /// Admin freeze window active - weight changes prohibited
+    #[error("Admin freeze window active. Cannot set weights")]
+    AdminFreezeWindowActive,
 }
 
 /// Weight submission status
@@ -364,6 +384,33 @@ impl WeightSubmissionRetryManager {
 
         self.failed_submissions
             .retain(|_, info| info.last_attempt > cutoff);
+    }
+
+    /// Check if error is retryable
+    pub fn is_retryable_error(error: &WeightSubmissionError) -> bool {
+        match error {
+            WeightSubmissionError::Timeout => true,
+            WeightSubmissionError::ChainError(_) => true,
+            WeightSubmissionError::CommittingWeightsTooFast(_, _) => true,
+            WeightSubmissionError::RateLimitExceeded(_) => true,
+            WeightSubmissionError::TooManyUnrevealedCommits(_) => true,
+            WeightSubmissionError::WeightAlreadySet => false, // Skip, don't retry
+            WeightSubmissionError::AdminFreezeWindowActive => false, // Skip, don't retry
+            WeightSubmissionError::InvalidWeights(_) => false, // Don't retry invalid data
+            WeightSubmissionError::DuplicateSubmission => false, // Don't retry duplicates
+            WeightSubmissionError::ValidationError(_) => false, // Don't retry validation errors
+        }
+    }
+
+    /// Get wait time for rate limit errors
+    pub fn get_wait_blocks_for_error(error: &WeightSubmissionError) -> Option<u64> {
+        match error {
+            WeightSubmissionError::RateLimitExceeded(blocks) => Some(*blocks),
+            WeightSubmissionError::CommittingWeightsTooFast(rate_limit, elapsed) => {
+                Some(rate_limit.saturating_sub(*elapsed))
+            }
+            _ => None,
+        }
     }
 }
 

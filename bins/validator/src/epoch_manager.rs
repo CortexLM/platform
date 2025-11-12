@@ -4,8 +4,8 @@ use crate::config::ValidatorConfig;
 use anyhow::Result;
 use platform_engine_api_client::PlatformClient;
 use platform_engine_chain::{
-    BlockSyncManager, ChallengeWeight, CommitWeightsConfig, CommitWeightsService, HotkeyMapper,
-    MechanismWeightAggregator, SubtensorClient,
+    BlockSyncManager, BlockchainMonitor, ChallengeWeight, CommitWeightsConfig, CommitWeightsService,
+    HotkeyMapper, MechanismWeightAggregator, NetworkHyperparameters, SubtensorClient,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +34,9 @@ pub struct EpochConfig {
     pub reveal_block_offset: u64,       // Block offset for reveal (after sync block)
     pub use_commit_reveal: bool,        // Activate commit-reveal instead of direct set_weights
     pub epoch_interval_blocks: u64,     // Interval in blocks to define an epoch
+    pub weight_submission_safety_margin: u64, // Blocks before epoch to submit (default: 10)
+    pub weight_submission_jitter_max: u64,    // Maximum random delay (default: 10)
+    pub weight_retry_backoff_multiplier: f64,  // Exponential backoff factor (default: 2.0)
 }
 
 impl Default for EpochConfig {
@@ -46,6 +49,9 @@ impl Default for EpochConfig {
             reveal_block_offset: 1,     // Reveal 1 block after sync block
             use_commit_reveal: false,   // Default to direct set_weights for backward compatibility
             epoch_interval_blocks: 360, // Same as block_interval by default
+            weight_submission_safety_margin: 10, // Submit 10 blocks before epoch end
+            weight_submission_jitter_max: 10,   // Max 10 blocks jitter
+            weight_retry_backoff_multiplier: 2.0, // Exponential backoff multiplier
         }
     }
 }
@@ -59,7 +65,9 @@ pub struct EpochManager {
     subtensor_client: Arc<SubtensorClient>,
     platform_client: PlatformClient,
     commit_weights_service: Option<Arc<CommitWeightsService>>,
+    blockchain_monitor: Arc<BlockchainMonitor>,
     netuid: u16, // Network UID for Bittensor subnet
+    validator_uid: Option<u16>, // Validator UID (cached)
     /// Cached weights for the current epoch (sync_block)
     cached_weights: Arc<RwLock<Option<CachedEpochWeights>>>,
 }
@@ -91,6 +99,12 @@ impl EpochManager {
             None
         };
 
+        // Initialize blockchain monitor
+        let blockchain_monitor = Arc::new(BlockchainMonitor::new(
+            subtensor_client.clone(),
+            netuid,
+        ));
+
         Self {
             config,
             validator_config,
@@ -99,7 +113,9 @@ impl EpochManager {
             subtensor_client,
             platform_client,
             commit_weights_service,
+            blockchain_monitor,
             netuid,
+            validator_uid: None,
             cached_weights: Arc::new(RwLock::new(None)),
         }
     }
@@ -146,6 +162,59 @@ impl EpochManager {
         let current_sync_block = sync_info.sync_block;
         drop(block_sync); // Release read lock before processing
 
+        // Get network hyperparameters for optimal timing calculation
+        let hyperparams = match self.blockchain_monitor.get_hyperparameters().await {
+            Ok(params) => params,
+            Err(e) => {
+                warn!("Failed to get hyperparameters: {}. Using defaults.", e);
+                NetworkHyperparameters::default()
+            }
+        };
+
+        // Check admin freeze window
+        if self.blockchain_monitor.is_in_admin_freeze_window(
+            hyperparams.tempo,
+            current_block,
+            hyperparams.admin_freeze_window,
+        ) {
+            warn!(
+                "Admin freeze window active at block {}. Skipping weight submission.",
+                current_block
+            );
+            return Ok(false);
+        }
+
+        // Check rate limit
+        if let Some(validator_uid) = self.validator_uid {
+            match self
+                .blockchain_monitor
+                .can_submit_weights(validator_uid, current_block)
+                .await
+            {
+                Ok(can_submit) => {
+                    if !can_submit {
+                        info!(
+                            "Rate limit active at block {}. Waiting for next opportunity.",
+                            current_block
+                        );
+                        return Ok(false);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to check rate limit: {}. Proceeding anyway.", e);
+                }
+            }
+        }
+
+        // Calculate optimal submission block
+        let optimal_block = self.blockchain_monitor.calculate_optimal_submission_block(
+            hyperparams.tempo,
+            hyperparams.weights_set_rate_limit,
+            current_block,
+            self.config.weight_submission_safety_margin,
+            self.config.weight_submission_jitter_max,
+        );
+
         // Check if we have cached weights for a previous epoch that needs to be retried
         let has_cached_weights = {
             let cache = self.cached_weights.read().await;
@@ -187,17 +256,18 @@ impl EpochManager {
         }
 
         // Process weights in these scenarios:
-        // 1. We're 10 blocks before sync_block (initial calculation/attempt)
+        // 1. We're at or past the optimal submission block
         // 2. We have cached weights for current sync_block (retry after failure)
         // 3. We've reached a new sync_block (calculate new weights)
-        let should_process =
-            blocks_until_sync == 10 || should_retry_with_cache || reached_new_sync_block;
+        let should_process = current_block >= optimal_block
+            || should_retry_with_cache
+            || reached_new_sync_block;
 
         if should_process {
-            if blocks_until_sync == 10 {
+            if current_block >= optimal_block && !should_retry_with_cache && !reached_new_sync_block {
                 info!(
-                    "⚡ Approaching sync block, collecting weights at block {}",
-                    current_block
+                    "⚡ Optimal submission block {} reached (current: {}), collecting weights",
+                    optimal_block, current_block
                 );
             } else if should_retry_with_cache {
                 info!(
@@ -468,9 +538,10 @@ impl EpochManager {
         }
     }
 
-    /// Submit weights to chain with retry logic
+    /// Submit weights to chain with intelligent retry logic
     async fn submit_weights_with_retry(&self, weights: Vec<(u64, u16)>) -> Result<()> {
         let mut retries = 0;
+        let mut last_error: Option<String> = None;
 
         while retries < self.config.weight_submission_retries {
             match self.submit_weights_to_chain(weights.clone()).await {
@@ -480,21 +551,62 @@ impl EpochManager {
                 }
                 Err(e) => {
                     retries += 1;
-                    error!(
-                        "Failed to submit weights (attempt {}/{}): {}",
-                        retries, self.config.weight_submission_retries, e
-                    );
+                    let error_str = e.to_string();
+                    last_error = Some(error_str.clone());
+                    
+                    // Try to parse error to determine if retryable
+                    let is_retryable = if error_str.contains("WeightAlreadySet") {
+                        // Weights already set - skip, don't retry
+                        info!("Weights already set for this epoch. Skipping submission.");
+                        return Ok(()); // Not an error, just skip
+                    } else if error_str.contains("TooManyUnrevealedCommits") {
+                        // Need to reveal pending commits first
+                        warn!("Too many unrevealed commits. Attempting to reveal pending commits.");
+                        // TODO: Trigger reveal of pending commits
+                        false // Don't retry set_weights, need to reveal first
+                    } else if error_str.contains("CommittingWeightsTooFast") || error_str.contains("RateLimitExceeded") {
+                        // Rate limit - calculate wait time
+                        info!("Rate limit exceeded. Will retry after appropriate delay.");
+                        true // Retryable, but need proper delay
+                    } else if error_str.contains("AdminFreezeWindowActive") {
+                        // Admin freeze - skip, don't retry
+                        warn!("Admin freeze window active. Skipping submission.");
+                        return Ok(()); // Not an error, just skip
+                    } else {
+                        // Other errors - retryable
+                        true
+                    };
+
+                    if !is_retryable {
+                        // Non-retryable error or skip condition
+                        return Err(anyhow::anyhow!(
+                            "Non-retryable error: {}",
+                            error_str
+                        ));
+                    }
 
                     if retries < self.config.weight_submission_retries {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        // Calculate exponential backoff delay
+                        let base_delay_secs = 5;
+                        let delay_secs = (base_delay_secs as f64
+                            * self.config.weight_retry_backoff_multiplier.powi(retries as i32 - 1))
+                            as u64;
+                        
+                        error!(
+                            "Failed to submit weights (attempt {}/{}): {}. Retrying in {} seconds...",
+                            retries, self.config.weight_submission_retries, error_str, delay_secs
+                        );
+                        
+                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                     }
                 }
             }
         }
 
         Err(anyhow::anyhow!(
-            "Failed to submit weights after {} retries",
-            self.config.weight_submission_retries
+            "Failed to submit weights after {} retries: {}",
+            self.config.weight_submission_retries,
+            last_error.unwrap_or_else(|| "Unknown error".to_string())
         ))
     }
 

@@ -66,6 +66,41 @@ impl MechanismWeightAggregator {
         })
     }
 
+    /// Check if a challenge is term-challenge based on compose_hash or name
+    fn is_term_challenge(compose_hash: &str) -> bool {
+        // Detect term-challenge by checking compose_hash pattern or name
+        // Term-challenge compose hashes typically contain "term" or specific patterns
+        compose_hash.contains("term") || compose_hash.contains("terminal")
+    }
+
+    /// Apply winner-takes-all logic for term-challenge
+    /// Returns weights with 100% (1.0) to the miner with highest accuracy/weight
+    fn apply_winner_takes_all(
+        raw_weights: &HashMap<String, f64>,
+    ) -> HashMap<String, f64> {
+        if raw_weights.is_empty() {
+            return HashMap::new();
+        }
+
+        // Find miner with highest weight (accuracy)
+        let best_miner = raw_weights
+            .iter()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((best_uid, _best_weight)) = best_miner {
+            let mut winner_takes_all = HashMap::new();
+            winner_takes_all.insert(best_uid.clone(), 1.0);
+            info!(
+                "Term-challenge winner-takes-all: {} gets 100% weight (accuracy: {:.4})",
+                best_uid, raw_weights[best_uid]
+            );
+            winner_takes_all
+        } else {
+            warn!("No best miner found for term-challenge winner-takes-all");
+            HashMap::new()
+        }
+    }
+
     /// Process weights for a single mechanism
     /// Made public so it can be used to process individual mechanisms separately
     pub fn process_mechanism(
@@ -83,31 +118,125 @@ impl MechanismWeightAggregator {
             });
         }
 
-        // Aggregate weights weighted by emission share
-        let mut aggregated: HashMap<String, f64> = HashMap::new();
+        // Check if any challenge is term-challenge (winner-takes-all)
+        let has_term_challenge = challenges
+            .iter()
+            .any(|c| Self::is_term_challenge(&c.compose_hash));
 
-        for challenge in &challenges {
-            let weight_factor = challenge.emission_share / total_emission_share;
+        let aggregated = if has_term_challenge {
+            // For term-challenge: winner-takes-all (100% to best accuracy agent)
+            info!(
+                "Mechanism {} contains term-challenge, applying winner-takes-all logic",
+                mechanism_id
+            );
 
-            for (uid, weight) in &challenge.raw_weights {
-                *aggregated.entry(uid.clone()).or_insert(0.0) += weight * weight_factor;
+            // Find the term-challenge challenge
+            let term_challenge = challenges
+                .iter()
+                .find(|c| Self::is_term_challenge(&c.compose_hash));
+
+            if let Some(term_challenge) = term_challenge {
+                // Apply winner-takes-all to term-challenge weights
+                let winner_weights = Self::apply_winner_takes_all(&term_challenge.raw_weights);
+
+                // If there are other challenges in the mechanism, aggregate them normally
+                let other_challenges: Vec<_> = challenges
+                    .iter()
+                    .filter(|c| !Self::is_term_challenge(&c.compose_hash))
+                    .collect();
+
+                if !other_challenges.is_empty() {
+                    // Aggregate other challenges weighted by emission share
+                    let mut other_aggregated: HashMap<String, f64> = HashMap::new();
+                    let other_emission: f64 = other_challenges.iter().map(|c| c.emission_share).sum();
+                    let term_emission = term_challenge.emission_share;
+                    let total_emission = other_emission + term_emission;
+
+                    for challenge in other_challenges {
+                        let weight_factor = challenge.emission_share / total_emission;
+                        for (uid, weight) in &challenge.raw_weights {
+                            *other_aggregated.entry(uid.clone()).or_insert(0.0) +=
+                                weight * weight_factor;
+                        }
+                    }
+
+                    // Combine: term-challenge gets term_emission/total_emission share,
+                    // other challenges get other_emission/total_emission share
+                    let mut combined = HashMap::new();
+                    let term_factor = term_emission / total_emission;
+                    let other_factor = other_emission / total_emission;
+
+                    // Add term-challenge winner weights
+                    for (uid, weight) in &winner_weights {
+                        combined.insert(uid.clone(), weight * term_factor);
+                    }
+
+                    // Add other challenge weights
+                    for (uid, weight) in &other_aggregated {
+                        *combined.entry(uid.clone()).or_insert(0.0) += weight * other_factor;
+                    }
+
+                    // Normalize
+                    let total: f64 = combined.values().sum();
+                    if total > 0.0 {
+                        for weight in combined.values_mut() {
+                            *weight /= total;
+                        }
+                    }
+
+                    combined
+                } else {
+                    // Only term-challenge in mechanism - winner gets 100% of mechanism emission
+                    winner_weights
+                }
+            } else {
+                // Fallback: shouldn't happen, but aggregate normally
+                warn!("Term-challenge flag set but no term-challenge found");
+                let mut aggregated: HashMap<String, f64> = HashMap::new();
+                for challenge in &challenges {
+                    let weight_factor = challenge.emission_share / total_emission_share;
+                    for (uid, weight) in &challenge.raw_weights {
+                        *aggregated.entry(uid.clone()).or_insert(0.0) += weight * weight_factor;
+                    }
+                }
+                let total_weight: f64 = aggregated.values().sum();
+                if total_weight > 0.0 {
+                    for weight in aggregated.values_mut() {
+                        *weight /= total_weight;
+                    }
+                }
+                aggregated
             }
-        }
+        } else {
+            // Normal aggregation: weighted by emission share
+            let mut aggregated: HashMap<String, f64> = HashMap::new();
 
-        // Normalize within mechanism
-        let total_weight: f64 = aggregated.values().sum();
-        if total_weight > 0.0 {
-            for weight in aggregated.values_mut() {
-                *weight /= total_weight;
+            for challenge in &challenges {
+                let weight_factor = challenge.emission_share / total_emission_share;
+
+                for (uid, weight) in &challenge.raw_weights {
+                    *aggregated.entry(uid.clone()).or_insert(0.0) += weight * weight_factor;
+                }
             }
-        }
+
+            // Normalize within mechanism
+            let total_weight: f64 = aggregated.values().sum();
+            if total_weight > 0.0 {
+                for weight in aggregated.values_mut() {
+                    *weight /= total_weight;
+                }
+            }
+
+            aggregated
+        };
 
         info!(
-            "Mechanism {}: {} challenges, {} unique UIDs, emission share: {:.4}",
+            "Mechanism {}: {} challenges, {} unique UIDs, emission share: {:.4}, term-challenge: {}",
             mechanism_id,
             challenges.len(),
             aggregated.len(),
-            total_emission_share
+            total_emission_share,
+            has_term_challenge
         );
 
         Ok(MechanismWeights {

@@ -71,7 +71,7 @@ impl CommitWeightsService {
     /// Generate random salt for commit-reveal
     fn generate_salt(&self, length: usize) -> Vec<u8> {
         let mut salt = vec![0u8; length];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         rng.fill_bytes(&mut salt);
         salt
     }
