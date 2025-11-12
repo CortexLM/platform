@@ -407,11 +407,24 @@ impl CommitWeightsService {
     /// Check if there's a pending commit that should be revealed at current block
     pub async fn get_pending_commit_for_reveal(&self, current_block: u64) -> Option<u64> {
         let pending_map = self.pending_commits.read().await;
-        // Reveal should happen at commit_block + 1
+        // Reveal should happen at commit_block + 1 (or later, within reveal window)
+        // Find the oldest commit that should be revealed (commit_block + 1 <= current_block)
         pending_map
             .keys()
-            .find(|&&commit_block| commit_block + 1 == current_block)
+            .filter(|&&commit_block| commit_block + 1 <= current_block)
+            .min()
             .copied()
+    }
+
+    /// Get all pending commits that need to be revealed
+    pub async fn get_all_pending_commits(&self, current_block: u64) -> Vec<u64> {
+        let pending_map = self.pending_commits.read().await;
+        // Return all commits that should be revealed (commit_block + 1 <= current_block)
+        pending_map
+            .keys()
+            .filter(|&&commit_block| commit_block + 1 <= current_block)
+            .copied()
+            .collect()
     }
 
     /// Cleanup old pending commits (older than N blocks)

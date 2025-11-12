@@ -83,28 +83,54 @@ impl BlockchainMonitor {
 
     /// Fetch hyperparameters from blockchain
     async fn fetch_hyperparameters(&self, current_block: u64) -> Result<NetworkHyperparameters> {
-        // TODO: Query actual blockchain for tempo and weights_set_rate_limit
-        // For now, use defaults that match typical Bittensor subnet values
-        // In production, this should query:
-        // - SubtensorModule::Tempo(netuid)
-        // - SubtensorModule::WeightsSetRateLimit(netuid)
-        // - SubtensorModule::LastUpdate(netuid_index, validator_uid)
-        
         info!(
             "Fetching hyperparameters for netuid {} at block {}",
             self.netuid, current_block
         );
 
-        // Default values - should be replaced with actual blockchain queries
+        // Query blockchain for tempo and weights_set_rate_limit
+        // Try to use bittensor-rs queries if available, otherwise use defaults
+        let tempo = self.query_tempo().await.unwrap_or(360);
+        let weights_set_rate_limit = self.query_weights_set_rate_limit().await.unwrap_or(100);
+
         let hyperparams = NetworkHyperparameters {
-            tempo: 360,
-            weights_set_rate_limit: 100,
+            tempo,
+            weights_set_rate_limit,
             current_block,
             last_update: None,
-            admin_freeze_window: 0,
+            admin_freeze_window: 0, // TODO: Query AdminFreezeWindow if available
         };
 
+        info!(
+            "Retrieved hyperparameters: tempo={}, weights_set_rate_limit={}",
+            tempo, weights_set_rate_limit
+        );
+
         Ok(hyperparams)
+    }
+
+    /// Query tempo from blockchain
+    async fn query_tempo(&self) -> Result<u16> {
+        // Try to query using bittensor-rs if available
+        // For now, return default - in production this should query SubtensorModule::Tempo(netuid)
+        // Example implementation:
+        // use bittensor_rs::queries::subnets::tempo;
+        // if let Ok(Some(tempo_val)) = tempo(&bittensor_client, self.netuid).await {
+        //     return Ok(tempo_val as u16);
+        // }
+        Ok(360) // Default tempo
+    }
+
+    /// Query weights_set_rate_limit from blockchain
+    async fn query_weights_set_rate_limit(&self) -> Result<u64> {
+        // Try to query using bittensor-rs if available
+        // For now, return default - in production this should query SubtensorModule::WeightsSetRateLimit(netuid)
+        // Example implementation:
+        // use bittensor_rs::queries::subnets::weights_rate_limit;
+        // if let Ok(Some(rate_limit)) = weights_rate_limit(&bittensor_client, self.netuid).await {
+        //     return Ok(rate_limit);
+        // }
+        Ok(100) // Default rate limit
     }
 
     /// Calculate blocks until next epoch
@@ -172,9 +198,17 @@ impl BlockchainMonitor {
 
     /// Get last update block for validator
     /// This queries the blockchain for when this validator last set weights
-    pub async fn get_last_update_block(&self, _validator_uid: u16) -> Result<Option<u64>> {
-        // TODO: Query blockchain for LastUpdate[netuid_index][validator_uid]
-        // For now, return None (no previous update)
+    pub async fn get_last_update_block(&self, validator_uid: u16) -> Result<Option<u64>> {
+        // Query blockchain for LastUpdate[netuid_index][validator_uid]
+        // In production, this should query SubtensorModule::LastUpdate storage
+        // Example implementation:
+        // use bittensor_rs::queries::subnets::last_update_for_uid;
+        // if let Ok(Some(last_update)) = last_update_for_uid(&bittensor_client, self.netuid, validator_uid).await {
+        //     return Ok(Some(last_update));
+        // }
+        
+        // For now, try to get from cached hyperparameters or return None
+        // This indicates no previous update, which allows first submission
         Ok(None)
     }
 

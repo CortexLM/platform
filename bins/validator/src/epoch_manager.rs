@@ -139,6 +139,36 @@ impl EpochManager {
         loop {
             check_interval.tick().await;
 
+            // Check for pending commits that need to be revealed
+            if let Some(commit_service) = &self.commit_weights_service {
+                let current_block = {
+                    let block_sync = self.block_sync_manager.read().await;
+                    block_sync.get_sync_info().current_block
+                };
+
+                // Check if there's a pending commit that should be revealed at current block
+                if let Some(commit_block) = commit_service
+                    .get_pending_commit_for_reveal(current_block)
+                    .await
+                {
+                    info!(
+                        "🔓 Auto-revealing weights committed at block {} (current: {})",
+                        commit_block, current_block
+                    );
+                    match commit_service
+                        .reveal_weights_with_retry(self.netuid, commit_block)
+                        .await
+                    {
+                        Ok(tx_hash) => {
+                            info!("✅ Successfully auto-revealed weights: {}", tx_hash);
+                        }
+                        Err(e) => {
+                            error!("Failed to auto-reveal weights: {}", e);
+                        }
+                    }
+                }
+            }
+
             match self.check_and_process_epoch().await {
                 Ok(processed) => {
                     if processed {
@@ -562,7 +592,46 @@ impl EpochManager {
                     } else if error_str.contains("TooManyUnrevealedCommits") {
                         // Need to reveal pending commits first
                         warn!("Too many unrevealed commits. Attempting to reveal pending commits.");
-                        // TODO: Trigger reveal of pending commits
+                        
+                        if let Some(commit_service) = &self.commit_weights_service {
+                            let current_block = {
+                                let block_sync = self.block_sync_manager.read().await;
+                                block_sync.get_sync_info().current_block
+                            };
+                            
+                            // Get all pending commits that need to be revealed
+                            let pending_commits = commit_service
+                                .get_all_pending_commits(current_block)
+                                .await;
+                            
+                            if let Some(oldest_commit_block) = pending_commits.iter().min() {
+                                info!(
+                                    "Revealing oldest pending commit from block {}",
+                                    oldest_commit_block
+                                );
+                                match commit_service
+                                    .reveal_weights_with_retry(self.netuid, *oldest_commit_block)
+                                    .await
+                                {
+                                    Ok(tx_hash) => {
+                                        info!("✅ Successfully revealed pending commit: {}", tx_hash);
+                                        // After revealing, we can retry the commit
+                                        return Ok(());
+                                    }
+                                    Err(reveal_err) => {
+                                        error!("Failed to reveal pending commit: {}", reveal_err);
+                                        // Still non-retryable until reveals are done
+                                        return Err(anyhow::anyhow!(
+                                            "Cannot proceed: need to reveal pending commits first: {}",
+                                            reveal_err
+                                        ));
+                                    }
+                                }
+                            } else {
+                                warn!("No pending commits found to reveal");
+                            }
+                        }
+                        
                         false // Don't retry set_weights, need to reveal first
                     } else if error_str.contains("CommittingWeightsTooFast") || error_str.contains("RateLimitExceeded") {
                         // Rate limit - calculate wait time
