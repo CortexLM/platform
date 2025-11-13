@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 /// Envelope used for encrypted WebSocket frames
@@ -221,7 +221,7 @@ impl ChallengeWsClient {
                     == "true";
 
                 if mock_vmm {
-                    warn!(
+                    debug!(
                         "MOCK VMM MODE: Cannot get validator TDX quote, using mock quote structure"
                     );
                     // In mock mode, create a mock quote structure (will be validated structurally)

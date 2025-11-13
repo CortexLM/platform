@@ -74,8 +74,8 @@ impl VmmClient {
             == "true";
 
         if mock_mode {
-            tracing::warn!(
-                "🔧 MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)"
+            tracing::debug!(
+                "MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)"
             );
         }
 
@@ -94,7 +94,6 @@ impl VmmClient {
                 "mock-vm-{}",
                 Uuid::new_v4().to_string().split('-').next().unwrap()
             );
-            info!("🔧 MOCK VMM: Created fake VM {} for {}", vm_id, config.name);
             return Ok(vm_id);
         }
 
@@ -184,7 +183,6 @@ impl VmmClient {
     pub async fn get_vm_info(&self, vm_id: &str) -> Result<VmInfo> {
         if self.mock_mode {
             // Mock mode: return fake VM info
-            info!("🔧 MOCK VMM: Returning fake VM info for {}", vm_id);
             return Ok(VmInfo {
                 id: vm_id.to_string(),
                 name: format!("mock-{}", vm_id),
@@ -221,7 +219,6 @@ impl VmmClient {
     /// Remove a VM
     pub async fn remove_vm(&self, vm_id: &str) -> Result<()> {
         if self.mock_mode {
-            info!("🔧 MOCK VMM: Removing fake VM {}", vm_id);
             return Ok(());
         }
 
@@ -243,7 +240,6 @@ impl VmmClient {
     /// Start a VM
     pub async fn start_vm(&self, vm_id: &str) -> Result<()> {
         if self.mock_mode {
-            info!("🔧 MOCK VMM: Starting fake VM {}", vm_id);
             return Ok(());
         }
 
@@ -265,7 +261,6 @@ impl VmmClient {
     /// Stop a VM
     pub async fn stop_vm(&self, vm_id: &str) -> Result<()> {
         if self.mock_mode {
-            info!("🔧 MOCK VMM: Stopping fake VM {}", vm_id);
             return Ok(());
         }
 
@@ -287,7 +282,6 @@ impl VmmClient {
     /// Kill a VM (force shutdown)
     pub async fn kill_vm(&self, vm_id: &str) -> Result<()> {
         if self.mock_mode {
-            info!("🔧 MOCK VMM: Killing fake VM {}", vm_id);
             return Ok(());
         }
 
@@ -335,7 +329,6 @@ impl VmmClient {
     pub async fn get_meta(&self) -> Result<VmmMetadata> {
         if self.mock_mode {
             // Mock mode: return fake metadata
-            info!("🔧 MOCK VMM: Returning fake VMM metadata");
             return Ok(VmmMetadata {
                 kms: None,
                 gateway: Some(GatewaySettings {
@@ -366,7 +359,6 @@ impl VmmClient {
     pub async fn list_vms(&self) -> Result<Vec<VmInfo>> {
         if self.mock_mode {
             // Mock mode: return empty list
-            info!("🔧 MOCK VMM: Returning empty VM list");
             return Ok(vec![]);
         }
 

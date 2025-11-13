@@ -216,7 +216,6 @@ impl CVMQuotaManager {
         let mut challenges = self.challenges.write().await;
 
         if active_challenges.is_empty() {
-            info!("No active challenges, clearing all reservations");
             for state in challenges.values_mut() {
                 state.reserved = ResourceRequest {
                     cpu_cores: 0,
