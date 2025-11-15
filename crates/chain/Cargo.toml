@@ -39,4 +39,4 @@ rand = { version = "0.9.2", features = ["std_rng"] }
 hex = "0.4"
 
 # Bittensor Rust SDK for commit_weights/reveal_weights
-bittensor-rs = { git = "https://github.com/CortexLM/bittensor-rs" }
+bittensor-rs = { git = "https://github.com/PlatformNetwork/bittensor-rs" }
