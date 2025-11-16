@@ -52,15 +52,24 @@ RUN --mount=type=cache,target=/app/target \
 # ============================================================================
 FROM debian:bookworm-slim
 
-# Install runtime dependencies only
+# Install runtime dependencies and Docker CLI
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     sqlite3 \
+    curl \
+    gnupg \
+    lsb-release \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y \
+    docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
-RUN useradd -m -u 1000 platform && \
+# Add user to docker group to access Docker socket (GID 987 matches host docker group)
+RUN groupadd -g 987 docker || true && \
+    useradd -m -u 1000 -G docker platform && \
     mkdir -p /app /data && \
     chown -R platform:platform /app /data
 

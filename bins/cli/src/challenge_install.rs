@@ -203,12 +203,13 @@ impl ChallengeInstallCmd {
         if platform_toml_path.exists() {
             println!("\n🔐 Environment Variables Configuration");
             if let Some(compose_hash) = &args.compose_hash {
-                if let Err(e) = self.handle_platform_toml_env_vars(
-                    &platform_toml_path,
-                    compose_hash,
-                    &args.platform_api_url,
-                )
-                .await
+                if let Err(e) = self
+                    .handle_platform_toml_env_vars(
+                        &platform_toml_path,
+                        compose_hash,
+                        &args.platform_api_url,
+                    )
+                    .await
                 {
                     eprintln!("⚠️  Warning: Failed to handle environment variables: {}", e);
                     eprintln!("   Challenge will be installed but env vars may need to be configured manually");
@@ -408,10 +409,10 @@ impl ChallengeInstallCmd {
         use inquire::{Password, Text};
 
         // Read and parse platform.toml
-        let toml_content = std::fs::read_to_string(platform_toml_path)
-            .context("Failed to read platform.toml")?;
-        let platform_toml: PlatformToml = toml::from_str(&toml_content)
-            .context("Failed to parse platform.toml")?;
+        let toml_content =
+            std::fs::read_to_string(platform_toml_path).context("Failed to read platform.toml")?;
+        let platform_toml: PlatformToml =
+            toml::from_str(&toml_content).context("Failed to parse platform.toml")?;
 
         // Extract required env vars
         let required_env_vars = if let Some(validator_config) = platform_toml.validator {
@@ -426,7 +427,10 @@ impl ChallengeInstallCmd {
             return Ok(());
         }
 
-        println!("  Found {} required environment variable(s)", required_env_vars.len());
+        println!(
+            "  Found {} required environment variable(s)",
+            required_env_vars.len()
+        );
 
         let mut env_vars = HashMap::new();
 
@@ -451,8 +455,7 @@ impl ChallengeInstallCmd {
                     .with_display_mode(inquire::PasswordDisplayMode::Hidden)
                     .prompt()?
             } else {
-                Text::new(&format!("Enter value for '{}'", env_config.name))
-                    .prompt()?
+                Text::new(&format!("Enter value for '{}'", env_config.name)).prompt()?
             };
 
             if value.is_empty() {
@@ -482,11 +485,21 @@ impl ChallengeInstallCmd {
                 .context("Failed to send environment variables to platform-api")?;
 
             if response.status().is_success() {
-                println!("\n✓ Successfully stored {} environment variable(s)", env_vars.len());
+                println!(
+                    "\n✓ Successfully stored {} environment variable(s)",
+                    env_vars.len()
+                );
             } else {
                 let status = response.status();
-                let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                anyhow::bail!("Failed to store environment variables: {} - {}", status, error_text);
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                anyhow::bail!(
+                    "Failed to store environment variables: {} - {}",
+                    status,
+                    error_text
+                );
             }
         }
 

@@ -10,6 +10,9 @@ pub struct ValidatorConfig {
     pub platform_api_url: String,
     pub dstack_vmm_url: String,
     pub resource_limits: ResourceLimits,
+    pub docker_socket_path: Option<String>,
+    pub docker_network: String,
+    pub use_docker: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +65,19 @@ impl ValidatorConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Docker configuration
+        let docker_socket_path = env::var("DOCKER_SOCKET_PATH").ok();
+        let docker_network =
+            env::var("DOCKER_NETWORK").unwrap_or_else(|_| "dev-platform-network".to_string());
+
+        // Determine if we should use Docker (dev mode)
+        let use_docker = env::var("VALIDATOR_MOCK_VMM")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+            || env::var("ENVIRONMENT_MODE")
+                .map(|v| v == "dev")
+                .unwrap_or(false);
+
         Ok(Self {
             validator_hotkey,
             hotkey_passphrase: passphrase,
@@ -73,6 +89,9 @@ impl ValidatorConfig {
                 disk_mb,
                 gpu_count,
             },
+            docker_socket_path,
+            docker_network,
+            use_docker,
         })
     }
 }

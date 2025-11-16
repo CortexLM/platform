@@ -184,14 +184,14 @@ impl PlatformApiClient for HttpPlatformApiClient {
     }
     
     async fn claim_job(&self, request: ClaimJobRequest) -> Result<ClaimJobResponse, PlatformApiClientError> {
-        self.post("/jobs/claim", &request).await
+        self.post("/api/jobs/claim", &request).await
     }
     
     async fn get_next_job(&self, validator_hotkey: &str, runtime: Option<&str>) -> Result<Option<ClaimJobResponse>, PlatformApiClientError> {
         let path = if let Some(runtime) = runtime {
-            format!("/jobs/next?validator_hotkey={}&runtime={}", validator_hotkey, runtime)
+            format!("/api/jobs/next?validator_hotkey={}&runtime={}", validator_hotkey, runtime)
         } else {
-            format!("/jobs/next?validator_hotkey={}", validator_hotkey)
+            format!("/api/jobs/next?validator_hotkey={}", validator_hotkey)
         };
         self.get(&path).await
     }

@@ -959,7 +959,7 @@ async fn attest(
     // Derive AEAD key using HKDF-SHA256
     let hk = Hkdf::<sha2::Sha256>::new(Some(&hkdf_salt_bytes), shared_secret.as_bytes());
     let mut aead_key = [0u8; 32];
-    hk.expand(b"validator-sdk-v1", &mut aead_key)
+    hk.expand(b"platform-api-sdk-v1", &mut aead_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Return crypto block with server public key

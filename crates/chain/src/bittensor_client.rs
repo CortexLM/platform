@@ -1,6 +1,5 @@
 use crate::types::{
-    ChainClient, ChainMetadata, SubnetInfo, ValidatorSet, WeightSubmission,
-    WeightSubmissionResult,
+    ChainClient, ChainMetadata, SubnetInfo, ValidatorSet, WeightSubmission, WeightSubmissionResult,
 };
 use async_trait::async_trait;
 use bittensor_rs::chain::BittensorClient as BtClient;

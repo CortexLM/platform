@@ -4,8 +4,9 @@ use crate::config::ValidatorConfig;
 use anyhow::Result;
 use platform_engine_api_client::PlatformClient;
 use platform_engine_chain::{
-    BlockSyncManager, BlockchainMonitor, ChallengeWeight, CommitWeightsConfig, CommitWeightsService,
-    HotkeyMapper, MechanismWeightAggregator, NetworkHyperparameters, SubtensorClient,
+    BlockSyncManager, BlockchainMonitor, ChallengeWeight, CommitWeightsConfig,
+    CommitWeightsService, HotkeyMapper, MechanismWeightAggregator, NetworkHyperparameters,
+    SubtensorClient,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,16 +28,16 @@ struct CachedEpochWeights {
 /// Configuration for epoch-based weight setting
 #[derive(Debug, Clone)]
 pub struct EpochConfig {
-    pub block_interval: u64,            // Every N blocks (default 360)
-    pub weight_query_timeout: u64,      // Timeout for weight queries in seconds
-    pub weight_submission_retries: u32, // Number of retries for chain submission
-    pub commit_block_offset: u64,       // Block offset for commit (before sync block)
-    pub reveal_block_offset: u64,       // Block offset for reveal (after sync block)
-    pub use_commit_reveal: bool,        // Activate commit-reveal instead of direct set_weights
-    pub epoch_interval_blocks: u64,     // Interval in blocks to define an epoch
+    pub block_interval: u64,                  // Every N blocks (default 360)
+    pub weight_query_timeout: u64,            // Timeout for weight queries in seconds
+    pub weight_submission_retries: u32,       // Number of retries for chain submission
+    pub commit_block_offset: u64,             // Block offset for commit (before sync block)
+    pub reveal_block_offset: u64,             // Block offset for reveal (after sync block)
+    pub use_commit_reveal: bool, // Activate commit-reveal instead of direct set_weights
+    pub epoch_interval_blocks: u64, // Interval in blocks to define an epoch
     pub weight_submission_safety_margin: u64, // Blocks before epoch to submit (default: 10)
-    pub weight_submission_jitter_max: u64,    // Maximum random delay (default: 10)
-    pub weight_retry_backoff_multiplier: f64,  // Exponential backoff factor (default: 2.0)
+    pub weight_submission_jitter_max: u64, // Maximum random delay (default: 10)
+    pub weight_retry_backoff_multiplier: f64, // Exponential backoff factor (default: 2.0)
 }
 
 impl Default for EpochConfig {
@@ -50,7 +51,7 @@ impl Default for EpochConfig {
             use_commit_reveal: false,   // Default to direct set_weights for backward compatibility
             epoch_interval_blocks: 360, // Same as block_interval by default
             weight_submission_safety_margin: 10, // Submit 10 blocks before epoch end
-            weight_submission_jitter_max: 10,   // Max 10 blocks jitter
+            weight_submission_jitter_max: 10, // Max 10 blocks jitter
             weight_retry_backoff_multiplier: 2.0, // Exponential backoff multiplier
         }
     }
@@ -66,7 +67,7 @@ pub struct EpochManager {
     platform_client: PlatformClient,
     commit_weights_service: Option<Arc<CommitWeightsService>>,
     blockchain_monitor: Arc<BlockchainMonitor>,
-    netuid: u16, // Network UID for Bittensor subnet
+    netuid: u16,                // Network UID for Bittensor subnet
     validator_uid: Option<u16>, // Validator UID (cached)
     /// Cached weights for the current epoch (sync_block)
     cached_weights: Arc<RwLock<Option<CachedEpochWeights>>>,
@@ -100,10 +101,7 @@ impl EpochManager {
         };
 
         // Initialize blockchain monitor
-        let blockchain_monitor = Arc::new(BlockchainMonitor::new(
-            subtensor_client.clone(),
-            netuid,
-        ));
+        let blockchain_monitor = Arc::new(BlockchainMonitor::new(subtensor_client.clone(), netuid));
 
         Self {
             config,
@@ -289,12 +287,12 @@ impl EpochManager {
         // 1. We're at or past the optimal submission block
         // 2. We have cached weights for current sync_block (retry after failure)
         // 3. We've reached a new sync_block (calculate new weights)
-        let should_process = current_block >= optimal_block
-            || should_retry_with_cache
-            || reached_new_sync_block;
+        let should_process =
+            current_block >= optimal_block || should_retry_with_cache || reached_new_sync_block;
 
         if should_process {
-            if current_block >= optimal_block && !should_retry_with_cache && !reached_new_sync_block {
+            if current_block >= optimal_block && !should_retry_with_cache && !reached_new_sync_block
+            {
                 info!(
                     "⚡ Optimal submission block {} reached (current: {}), collecting weights",
                     optimal_block, current_block
@@ -583,7 +581,7 @@ impl EpochManager {
                     retries += 1;
                     let error_str = e.to_string();
                     last_error = Some(error_str.clone());
-                    
+
                     // Try to parse error to determine if retryable
                     let is_retryable = if error_str.contains("WeightAlreadySet") {
                         // Weights already set - skip, don't retry
@@ -592,18 +590,17 @@ impl EpochManager {
                     } else if error_str.contains("TooManyUnrevealedCommits") {
                         // Need to reveal pending commits first
                         warn!("Too many unrevealed commits. Attempting to reveal pending commits.");
-                        
+
                         if let Some(commit_service) = &self.commit_weights_service {
                             let current_block = {
                                 let block_sync = self.block_sync_manager.read().await;
                                 block_sync.get_sync_info().current_block
                             };
-                            
+
                             // Get all pending commits that need to be revealed
-                            let pending_commits = commit_service
-                                .get_all_pending_commits(current_block)
-                                .await;
-                            
+                            let pending_commits =
+                                commit_service.get_all_pending_commits(current_block).await;
+
                             if let Some(oldest_commit_block) = pending_commits.iter().min() {
                                 info!(
                                     "Revealing oldest pending commit from block {}",
@@ -614,7 +611,10 @@ impl EpochManager {
                                     .await
                                 {
                                     Ok(tx_hash) => {
-                                        info!("✅ Successfully revealed pending commit: {}", tx_hash);
+                                        info!(
+                                            "✅ Successfully revealed pending commit: {}",
+                                            tx_hash
+                                        );
                                         // After revealing, we can retry the commit
                                         return Ok(());
                                     }
@@ -631,9 +631,11 @@ impl EpochManager {
                                 warn!("No pending commits found to reveal");
                             }
                         }
-                        
+
                         false // Don't retry set_weights, need to reveal first
-                    } else if error_str.contains("CommittingWeightsTooFast") || error_str.contains("RateLimitExceeded") {
+                    } else if error_str.contains("CommittingWeightsTooFast")
+                        || error_str.contains("RateLimitExceeded")
+                    {
                         // Rate limit - calculate wait time
                         info!("Rate limit exceeded. Will retry after appropriate delay.");
                         true // Retryable, but need proper delay
@@ -648,24 +650,24 @@ impl EpochManager {
 
                     if !is_retryable {
                         // Non-retryable error or skip condition
-                        return Err(anyhow::anyhow!(
-                            "Non-retryable error: {}",
-                            error_str
-                        ));
+                        return Err(anyhow::anyhow!("Non-retryable error: {}", error_str));
                     }
 
                     if retries < self.config.weight_submission_retries {
                         // Calculate exponential backoff delay
                         let base_delay_secs = 5;
                         let delay_secs = (base_delay_secs as f64
-                            * self.config.weight_retry_backoff_multiplier.powi(retries as i32 - 1))
+                            * self
+                                .config
+                                .weight_retry_backoff_multiplier
+                                .powi(retries as i32 - 1))
                             as u64;
-                        
+
                         error!(
                             "Failed to submit weights (attempt {}/{}): {}. Retrying in {} seconds...",
                             retries, self.config.weight_submission_retries, error_str, delay_secs
                         );
-                        
+
                         tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                     }
                 }

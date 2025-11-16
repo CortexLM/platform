@@ -72,7 +72,7 @@ impl PlatformClient {
 
     /// Get pending jobs for this validator
     pub async fn get_pending_jobs(&self) -> Result<JobsResponse> {
-        let url = format!("{}/jobs/pending", self.base_url);
+        let url = format!("{}/api/jobs/pending", self.base_url);
         let client = reqwest::Client::new();
 
         let resp = client
@@ -87,16 +87,66 @@ impl PlatformClient {
 
     /// Claim a specific job
     pub async fn claim_job(&self, job_id: &str) -> Result<JobInfo> {
-        let url = format!("{}/jobs/{}/claim", self.base_url, job_id);
+        use serde_json::{json, Value};
+
+        let url = format!("{}/api/jobs/{}/claim", self.base_url, job_id);
         let client = reqwest::Client::new();
+
+        let request_body = json!({
+            "validator_hotkey": self.validator_hotkey,
+            "runtime": "Docker",
+            "capabilities": []
+        });
 
         let resp = client
             .post(&url)
             .header("X-Validator-Hotkey", &self.validator_hotkey)
+            .json(&request_body)
             .send()
             .await?;
 
-        let job: JobInfo = resp.json().await?;
+        // API returns ClaimJobResponse { job: JobMetadata, ... }
+        // Extract the job field and convert to JobInfo
+        let response: Value = resp.json().await?;
+        let job_metadata = response
+            .get("job")
+            .ok_or_else(|| anyhow::anyhow!("Missing 'job' field in claim response"))?;
+
+        let job = JobInfo {
+            id: job_metadata
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(job_id)
+                .to_string(),
+            challenge_id: job_metadata
+                .get("challenge_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            submission_id: job_metadata
+                .get("payload")
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(job_id)
+                .to_string(),
+            miner_hotkey: job_metadata
+                .get("payload")
+                .and_then(|p| p.get("agent_hash"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            status: job_metadata
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claimed")
+                .to_string(),
+            created_at: job_metadata
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        };
+
         Ok(job)
     }
 
@@ -116,7 +166,8 @@ impl PlatformClient {
     }
 
     /// Execute ORM query for a challenge (read-only)
-    /// This forwards ORM queries from challenge SDK to platform-api
+    /// This forwards ORM queries from challenge SDK to platform-api (DEPRECATED: Use WebSocket)
+    #[deprecated(note = "Use send_orm_query_via_websocket instead")]
     pub async fn execute_orm_query(
         &self,
         challenge_id: &str,
@@ -144,6 +195,28 @@ impl PlatformClient {
 
         let result: serde_json::Value = resp.json().await?;
         Ok(result)
+    }
+    
+    /// Send ORM query via WebSocket connection
+    /// This method should be called from within the WebSocket callback
+    pub async fn send_orm_query_via_websocket(
+        &self,
+        ws_sender: &Arc<tokio::sync::mpsc::Sender<String>>,
+        challenge_id: &str,
+        query: serde_json::Value,
+        query_id: &str,
+    ) -> Result<()> {
+        let message = serde_json::json!({
+            "message_type": "orm_query",
+            "query": query,
+            "challenge_id": challenge_id,
+            "query_id": query_id
+        });
+        
+        ws_sender.send(serde_json::to_string(&message)?).await
+            .map_err(|e| anyhow::anyhow!("Failed to send ORM query via WebSocket: {}", e))?;
+        
+        Ok(())
     }
 
     /// Connect to WebSocket for real-time job updates
@@ -199,7 +272,6 @@ impl PlatformClient {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    info!("Received WebSocket message: {}", text);
                     callback(text, tx_clone.clone());
                 }
                 Ok(Message::Close(_)) => {

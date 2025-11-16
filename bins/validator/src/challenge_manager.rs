@@ -1,7 +1,8 @@
 use crate::challenge_ws::ChallengeWsClient;
 use crate::cvm_quota::CVMQuotaManager;
+use crate::docker_client::{ContainerConfig, DockerClient, PortMapping as DockerPortMapping};
 use crate::env_prompt::get_or_prompt_env_vars;
-use crate::vmm_client::{PortMapping, VmConfiguration, VmmClient};
+use crate::vmm_client::{VmConfiguration, VmmClient};
 use anyhow::{Context, Result};
 use base64;
 use chrono::{DateTime, Utc};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // Re-export ChallengeSpec from platform-api models
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +109,7 @@ pub enum ChallengeState {
 }
 
 /// Challenge instance managed by validator
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChallengeInstance {
     pub compose_hash: String,
     pub name: String, // Challenge name to detect compose_hash changes
@@ -120,12 +121,16 @@ pub struct ChallengeInstance {
     pub challenge_api_url: Option<String>,
     pub deprecated_at: Option<DateTime<Utc>>, // Timestamp when deprecated for timeout tracking
     pub ws_started: bool,
+    pub ws_sender: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>>, // WebSocket sender for sending messages
 }
 
 /// Challenge Manager orchestrates challenge CVMs
 pub struct ChallengeManager {
     client: PlatformClient,
     vmm_client: VmmClient,
+    docker_client: Option<Arc<DockerClient>>, // Docker client for dev mode
+    docker_network: String,                   // Docker network name
+    use_docker: bool,                         // Whether to use Docker instead of VMM
     challenges: Arc<RwLock<HashMap<String, ChallengeInstance>>>, // Key: compose_hash
     challenges_by_name: Arc<RwLock<HashMap<String, String>>>, // Key: name, Value: current compose_hash
     pub challenge_specs: Arc<RwLock<HashMap<String, ChallengeSpec>>>, // Key: compose_hash
@@ -134,6 +139,8 @@ pub struct ChallengeManager {
     validator_base_url: String, // URL for challenge CVMs to connect to validator
     gateway_url: Option<String>, // Gateway URL for CVM-to-CVM communication
     dynamic_values: Arc<DynamicValuesManager>, // For storing private environment variables
+    platform_ws_sender: Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::mpsc::Sender<String>>>>>, // Platform API WebSocket sender
+    orm_query_routing: Arc<RwLock<HashMap<String, (String, tokio::sync::mpsc::Sender<serde_json::Value>)>>>, // Key: query_id, Value: (compose_hash, challenge_ws_sender)
 }
 
 impl ChallengeManager {
@@ -142,6 +149,9 @@ impl ChallengeManager {
         vmm_url: String,
         quota_manager: Arc<CVMQuotaManager>,
         dynamic_values: Arc<DynamicValuesManager>,
+        docker_client: Option<Arc<DockerClient>>,
+        docker_network: String,
+        use_docker: bool,
     ) -> Self {
         // Get validator base URL from environment or use default
         let validator_base_url = std::env::var("VALIDATOR_BASE_URL")
@@ -150,6 +160,9 @@ impl ChallengeManager {
         Self {
             client,
             vmm_client: VmmClient::new(vmm_url),
+            docker_client,
+            docker_network,
+            use_docker,
             challenges: Arc::new(RwLock::new(HashMap::new())),
             challenges_by_name: Arc::new(RwLock::new(HashMap::new())),
             challenge_specs: Arc::new(RwLock::new(HashMap::new())),
@@ -158,6 +171,47 @@ impl ChallengeManager {
             validator_base_url,
             gateway_url: None, // Will be populated from VMM metadata
             dynamic_values,
+            platform_ws_sender: Arc::new(tokio::sync::Mutex::new(None)),
+            orm_query_routing: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Set the platform WebSocket sender for ORM queries
+    pub async fn set_platform_ws_sender(&self, sender: Arc<tokio::sync::mpsc::Sender<String>>) {
+        let mut guard = self.platform_ws_sender.lock().await;
+        *guard = Some(sender);
+    }
+    
+    /// Handle ORM result from platform API and forward to the appropriate challenge
+    pub async fn handle_orm_result(&self, result: serde_json::Value, query_id: Option<String>) {
+        if let Some(qid) = query_id {
+            // Look up the routing information
+            let routing_guard = self.orm_query_routing.read().await;
+            if let Some((compose_hash, sender)) = routing_guard.get(&qid) {
+                let compose_hash = compose_hash.clone();
+                let sender = sender.clone();
+                drop(routing_guard); // Release the lock early
+                
+                // Create response message
+                let mut response = serde_json::json!({
+                    "type": "orm_result",
+                    "result": result.get("result").unwrap_or(&result).clone()
+                });
+                response["query_id"] = serde_json::Value::String(qid.clone());
+                
+                // Send response to challenge
+                if let Err(e) = sender.send(response).await {
+                    warn!("Failed to forward ORM result to challenge {}: {}", compose_hash, e);
+                }
+                
+                // Clean up routing entry
+                let mut routing_guard = self.orm_query_routing.write().await;
+                routing_guard.remove(&qid);
+            } else {
+                warn!("No routing found for ORM result with query_id: {}", qid);
+            }
+        } else {
+            warn!("Received ORM result without query_id - cannot route to challenge");
         }
     }
 
@@ -270,6 +324,7 @@ impl ChallengeManager {
                     challenge_api_url: None,
                     deprecated_at: None,
                     ws_started: false,
+                    ws_sender: Arc::new(tokio::sync::Mutex::new(None)),
                 };
 
                 challenges.insert(compose_hash.clone(), instance);
@@ -318,6 +373,7 @@ impl ChallengeManager {
                 challenge_api_url: None,
                 deprecated_at: None,
                 ws_started: false,
+                ws_sender: Arc::new(tokio::sync::Mutex::new(None)),
             };
             challenges.insert(spec.compose_hash, instance);
         }
@@ -373,20 +429,176 @@ impl ChallengeManager {
             .collect()
     }
 
+    /// Get challenge API URL by challenge_id (UUID or name)
+    /// Returns None if challenge is not found or not in Active state
+    pub async fn get_challenge_api_url(&self, challenge_id: &str) -> Result<Option<String>> {
+        let specs = self.challenge_specs.read().await;
+        let challenges = self.challenges.read().await;
+
+        // Find the challenge spec by id or name
+        let spec = specs
+            .values()
+            .find(|spec| spec.id == challenge_id || spec.name == challenge_id);
+
+        if let Some(spec) = spec {
+            let compose_hash = &spec.compose_hash;
+
+            // Find the challenge instance
+            if let Some(instance) = challenges.get(compose_hash) {
+                // Only return URL if challenge is Active
+                if instance.state == ChallengeState::Active {
+                    return Ok(instance.challenge_api_url.clone());
+                } else {
+                    warn!(
+                        "Challenge {} is not in Active state (current: {:?})",
+                        challenge_id, instance.state
+                    );
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Send job_execute message to challenge via WebSocket
+    /// Retries if WebSocket connection is not yet established
+    pub async fn send_job_execute(
+        &self,
+        challenge_id: &str,
+        job_id: &str,
+        job_name: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        // Find challenge by id or name
+        let compose_hash = {
+            let specs = self.challenge_specs.read().await;
+            specs
+                .values()
+                .find(|spec| spec.id == challenge_id || spec.name == challenge_id)
+                .map(|spec| spec.compose_hash.clone())
+        };
+
+        let compose_hash = match compose_hash {
+            Some(hash) => hash,
+            None => {
+                return Err(anyhow::anyhow!("Challenge {} not found", challenge_id));
+            }
+        };
+
+        // Get WebSocket sender
+        let ws_sender = {
+            let challenges = self.challenges.read().await;
+            if let Some(instance) = challenges.get(&compose_hash) {
+                if instance.state != ChallengeState::Active {
+                    return Err(anyhow::anyhow!(
+                        "Challenge {} is not in Active state",
+                        challenge_id
+                    ));
+                }
+                instance.ws_sender.clone()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Challenge instance not found for {}",
+                    challenge_id
+                ));
+            }
+        };
+
+        // Send job_execute message with retry logic
+        let job_msg = serde_json::json!({
+            "type": "job_execute",
+            "job_id": job_id,
+            "job_name": job_name,
+            "payload": payload,
+        });
+
+        // Retry up to 10 times with 500ms delay between attempts
+        // This gives the WebSocket connection time to establish and complete attestation
+        let max_retries = 10;
+        let retry_delay = tokio::time::Duration::from_millis(500);
+
+        for attempt in 0..max_retries {
+            let sender_opt = {
+                let sender_guard = ws_sender.lock().await;
+                sender_guard.as_ref().map(|s| s.clone())
+            };
+
+            if let Some(sender) = sender_opt {
+                match sender.send(job_msg.clone()).await {
+                    Ok(_) => {
+                        info!(
+                            "Sent job_execute message for job {} to challenge {} (attempt {})",
+                            job_id,
+                            challenge_id,
+                            attempt + 1
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        if attempt == max_retries - 1 {
+                            return Err(anyhow::anyhow!(
+                                "Failed to send job_execute after {} attempts: {}",
+                                max_retries,
+                                e
+                            ));
+                        }
+                        warn!(
+                            "Failed to send job_execute (attempt {}): {}, retrying...",
+                            attempt + 1,
+                            e
+                        );
+                    }
+                }
+            } else {
+                if attempt == max_retries - 1 {
+                    return Err(anyhow::anyhow!(
+                        "WebSocket connection not established for challenge {} after {} attempts",
+                        challenge_id,
+                        max_retries
+                    ));
+                }
+                debug!(
+                    "WebSocket sender not yet available for challenge {} (attempt {}), waiting...",
+                    challenge_id,
+                    attempt + 1
+                );
+            }
+
+            tokio::time::sleep(retry_delay).await;
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to send job_execute: max retries exceeded"
+        ))
+    }
+
     /// Reconcile loop - ensures exactly one CVM per compose_hash
     pub async fn reconcile(&self) -> Result<()> {
         let challenges = self.challenges.read().await;
         let specs = self.challenge_specs.read().await;
 
+        // Debug: log reconcile execution
+        if !challenges.is_empty() {
+            let states: Vec<(String, String)> = challenges
+                .iter()
+                .map(|(hash, inst)| (hash.clone(), format!("{:?}", inst.state)))
+                .collect();
+            debug!("Reconciling challenges: {:?}", states);
+        }
+
         for (compose_hash, instance) in challenges.iter() {
+            debug!(
+                "Processing challenge {} in state {:?}",
+                compose_hash, instance.state
+            );
             match instance.state {
                 ChallengeState::Created => {
-                    // Provision new CVM (only if not already being provisioned)
+                    // Provision new CVM or Docker container (only if not already being provisioned)
                     if let Some(spec) = specs.get(compose_hash) {
-                        // Check if CVM already exists
+                        // Check if CVM/container already exists
                         if let Some(cvm_id) = &instance.cvm_instance_id {
                             warn!(
-                                "Challenge {} already has CVM {}, skipping provisioning",
+                                "Challenge {} already has CVM/container {}, skipping provisioning",
                                 compose_hash, cvm_id
                             );
                             drop(challenges);
@@ -398,7 +610,13 @@ impl ChallengeManager {
                         let compose_hash_clone = compose_hash.clone();
                         drop(challenges);
                         drop(specs);
-                        self.provision_cvm(spec_clone).await?;
+
+                        // Use Docker in dev mode, VMM in production
+                        if self.use_docker {
+                            self.provision_docker_container(spec_clone).await?;
+                        } else {
+                            self.provision_cvm(spec_clone).await?;
+                        }
                         return Ok(()); // Return after one operation to avoid deadlock
                     }
                 }
@@ -409,8 +627,18 @@ impl ChallengeManager {
                         let cvm_id_clone = cvm_id.clone();
                         drop(challenges);
                         drop(specs);
-                        self.check_provisioning_status(&compose_hash_clone, &cvm_id_clone)
+
+                        // Use Docker check in dev mode, VMM check in production
+                        if self.use_docker {
+                            self.check_docker_provisioning_status(
+                                &compose_hash_clone,
+                                &cvm_id_clone,
+                            )
                             .await?;
+                        } else {
+                            self.check_provisioning_status(&compose_hash_clone, &cvm_id_clone)
+                                .await?;
+                        }
                         return Ok(());
                     }
                 }
@@ -421,9 +649,18 @@ impl ChallengeManager {
                         let api_url_clone = api_url.clone();
                         drop(challenges);
                         drop(specs);
+                        debug!(
+                            "Starting health probe for challenge {} at {}",
+                            compose_hash_clone, api_url_clone
+                        );
                         self.probe_health(&compose_hash_clone, &api_url_clone)
                             .await?;
                         return Ok(());
+                    } else {
+                        warn!(
+                            "Challenge {} in Probing state but no api_url set",
+                            compose_hash
+                        );
                     }
                 }
                 ChallengeState::Active => {
@@ -442,6 +679,16 @@ impl ChallengeManager {
                                 specs.get(&compose_hash_clone).map(|s| s.id.clone())
                             };
 
+                            // Get ws_sender from instance to store it
+                            let ws_sender_arc = {
+                                let challenges = self.challenges.read().await;
+                                if let Some(instance) = challenges.get(&compose_hash_clone) {
+                                    instance.ws_sender.clone()
+                                } else {
+                                    return Ok(());
+                                }
+                            };
+
                             // Turn https://host:port into wss://host:port/sdk/ws
                             let ws_url = api_url_clone
                                 .replace("https://", "wss://")
@@ -455,9 +702,84 @@ impl ChallengeManager {
                             let compose_hash_for_spawn = compose_hash_clone.clone();
                             let platform_client = self.client.clone();
                             let challenge_id_for_orm = challenge_id_opt.clone();
+                            let ws_sender_for_store = ws_sender_arc.clone();
+                            let platform_ws_sender_spawn = self.platform_ws_sender.clone();
+                            let orm_query_routing_spawn = self.orm_query_routing.clone();
+                            
                             tokio::spawn(async move {
-                                client.connect_with_reconnect(move |json, sender| {
-                                    // Forward known types to Platform API via HTTP
+                                // on_ready callback: store sender and initialize ORM bridge
+                                let ws_sender_for_ready = ws_sender_for_store.clone();
+                                let compose_hash_for_ready = compose_hash_for_log.clone();
+                                let on_ready_cb = move |sender: tokio::sync::mpsc::Sender<
+                                    serde_json::Value,
+                                >| {
+                                    let sender_clone = sender.clone();
+                                    let ws_sender_store = ws_sender_for_ready.clone();
+                                    let compose_hash_log = compose_hash_for_ready.clone();
+                                    
+                                    // Store sender asynchronously (non-blocking)
+                                    tokio::spawn(async move {
+                                        let mut guard = ws_sender_store.lock().await;
+                                        // Always update the sender, even if one already exists (in case of reconnection with new keys)
+                                        *guard = Some(sender_clone.clone());
+                                        info!("✅ WebSocket sender stored/updated for challenge {} (ready for job_execute)", compose_hash_log);
+                                        
+                                        // Initialize ORM bridge: send orm_ready without schema
+                                        // Platform API will resolve the correct schema when processing ORM queries
+                                        let orm_ready_msg = serde_json::json!({
+                                            "type": "orm_ready"
+                                        });
+                                        
+                                        if let Err(e) = sender_clone.send(orm_ready_msg).await {
+                                            error!("Failed to send orm_ready to challenge {}: {}", compose_hash_log, e);
+                                        } else {
+                                            info!("✅ Sent orm_ready signal to challenge {} (schema will be resolved by platform-api)", compose_hash_log);
+                                        }
+                                    });
+                                };
+
+                                let ws_sender_for_cleanup = ws_sender_for_store.clone();
+                                let compose_hash_for_cleanup = compose_hash_for_spawn.clone();
+
+                                // Clean up ws_sender before each reconnection attempt
+                                {
+                                    let mut guard = ws_sender_for_cleanup.lock().await;
+                                    if guard.is_some() {
+                                        *guard = None;
+                                        info!("🔄 Cleared old WebSocket sender for challenge {} (preparing for reconnection)", compose_hash_for_cleanup);
+                                    }
+                                }
+
+                                let ws_sender_for_disconnect_loop = ws_sender_for_store.clone();
+                                let compose_hash_for_disconnect =
+                                    Arc::new(compose_hash_for_spawn.clone());
+                                let on_disconnect_cb = {
+                                    let compose_hash_for_disconnect =
+                                        compose_hash_for_disconnect.clone();
+                                    move || {
+                                        let ws_sender_cleanup =
+                                            ws_sender_for_disconnect_loop.clone();
+                                        let compose_hash_log = compose_hash_for_disconnect.clone();
+                                        tokio::spawn(async move {
+                                            let mut guard = ws_sender_cleanup.lock().await;
+                                            if guard.is_some() {
+                                                *guard = None;
+                                                info!(
+                                                    "🔌 Cleared WebSocket sender for challenge {} (connection closed)",
+                                                    compose_hash_log.as_str()
+                                                );
+                                            }
+                                        });
+                                    }
+                                };
+                                
+                                // Use the cloned versions from outside the tokio::spawn
+                                let platform_ws_sender_for_orm = platform_ws_sender_spawn.clone();
+                                let orm_query_routing_for_orm = orm_query_routing_spawn.clone();
+
+                                client.connect_with_reconnect_and_ready(
+                                    move |json, sender| {
+                                        // Forward known types to Platform API via HTTP
                                     if let Some(typ) = json.get("type").and_then(|t| t.as_str()) {
                                         match typ {
                                             "heartbeat" => {
@@ -484,66 +806,96 @@ impl ChallengeManager {
                                             "orm_query" => {
                                                 // Forward ORM query to platform-api (read-only)
                                                 // The message structure from challenge SDK is:
-                                                // { "type": "orm_query", "query": { ... ORMQuery ... }, "query_id": "..." }
-                                                if let Some(query_payload) = json.get("query") {
+                                                // { "type": "orm_query", "payload": { "query": { ... ORMQuery ... }, "query_id": "..." } }
+                                                if let Some(query_payload) = json.get("payload").and_then(|p| p.get("query")) {
                                                     let query_clone = query_payload.clone();
                                                     let client_clone = platform_client.clone();
                                                     let challenge_id_clone = challenge_id_for_orm.clone();
                                                     let sender_clone = sender.clone();
 
                                                     // Extract query_id if present for response matching
-                                                    let query_id = json.get("query_id").and_then(|q| q.as_str()).map(|s| s.to_string());
+                                                    // Check both payload.query_id and top-level query_id
+                                                    let query_id = json.get("payload")
+                                                        .and_then(|p| p.get("query_id"))
+                                                        .and_then(|q| q.as_str())
+                                                        .or_else(|| json.get("query_id").and_then(|q| q.as_str()))
+                                                        .map(|s| s.to_string());
 
                                                     // Clone compose_hash for spawn (it's captured in Fn closure)
                                                     let compose_hash_spawn_clone = compose_hash_for_spawn.clone();
 
+                                                    // Use the cloned versions from outside the closure
+                                                    let platform_ws_sender = platform_ws_sender_for_orm.clone();
+                                                    let orm_query_routing = orm_query_routing_for_orm.clone();
+                                                    
                                                     tokio::spawn(async move {
                                                         if let Some(challenge_id) = challenge_id_clone {
-                                                            info!("Forwarding ORM query to platform-api for challenge {}", challenge_id);
-                                                            match client_clone.execute_orm_query(&challenge_id, query_clone).await {
-                                                                Ok(result) => {
-                                                                    // Platform-api returns: { "success": true, "result": { ... QueryResult ... } }
-                                                                    // Extract the QueryResult from the response
-                                                                    let orm_result = if let Some(result_obj) = result.get("result") {
-                                                                        result_obj.clone()
-                                                                    } else {
-                                                                        // Fallback: return entire response
-                                                                        result
-                                                                    };
-
-                                                                    // Send orm_result back to challenge in the expected format
-                                                                    let mut response = serde_json::json!({
-                                                                        "type": "orm_result",
-                                                                        "result": orm_result
-                                                                    });
-
-                                                                    // Include query_id if present for matching
-                                                                    if let Some(ref qid) = query_id {
-                                                                        response["query_id"] = serde_json::Value::String(qid.clone());
+                                                            info!("Forwarding ORM query to platform-api via WebSocket for challenge {}", challenge_id);
+                                                            
+                                                            // Get platform WebSocket sender
+                                                            let ws_sender_guard = platform_ws_sender.lock().await;
+                                                            if let Some(ref ws_sender) = *ws_sender_guard {
+                                                                // Generate a unique query_id if not present
+                                                                let final_query_id = query_id.clone()
+                                                                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                                                
+                                                                // Store routing information
+                                                                {
+                                                                    let mut routing_guard = orm_query_routing.write().await;
+                                                                    routing_guard.insert(
+                                                                        final_query_id.clone(),
+                                                                        (compose_hash_spawn_clone.clone(), sender_clone.clone())
+                                                                    );
+                                                                }
+                                                                
+                                                                // Send ORM query via WebSocket
+                                                                match client_clone.send_orm_query_via_websocket(
+                                                                    ws_sender,
+                                                                    &challenge_id,
+                                                                    query_clone,
+                                                                    &final_query_id
+                                                                ).await {
+                                                                    Ok(_) => {
+                                                                        // Note: The response will come back through the WebSocket message handler
+                                                                        // and will be routed back to the challenge based on query_id
                                                                     }
+                                                                    Err(e) => {
+                                                                        error!("Failed to send ORM query via WebSocket: {}", e);
+                                                                        
+                                                                        // Clean up routing entry
+                                                                        {
+                                                                            let mut routing_guard = orm_query_routing.write().await;
+                                                                            routing_guard.remove(&final_query_id);
+                                                                        }
 
-                                                                    if let Err(e) = sender_clone.send(response).await {
-                                                                        warn!("Failed to send ORM result to challenge: {}", e);
-                                                                    } else {
-                                                                        info!("✅ ORM query forwarded and result sent to challenge");
+                                                                        // Send error response to challenge
+                                                                        let mut error_response = serde_json::json!({
+                                                                            "type": "error",
+                                                                            "message": format!("ORM query failed: {}", e)
+                                                                        });
+
+                                                                        error_response["query_id"] = serde_json::Value::String(final_query_id.clone());
+
+                                                                        if let Err(send_err) = sender_clone.send(error_response).await {
+                                                                            warn!("Failed to send ORM error to challenge: {}", send_err);
+                                                                        }
                                                                     }
                                                                 }
-                                                                Err(e) => {
-                                                                    error!("Failed to forward ORM query to platform-api: {}", e);
+                                                            } else {
+                                                                error!("Platform WebSocket not connected - cannot forward ORM query");
+                                                                
+                                                                // Send error response to challenge
+                                                                let mut error_response = serde_json::json!({
+                                                                    "type": "error",
+                                                                    "message": "Platform WebSocket not connected"
+                                                                });
 
-                                                                    // Send error response to challenge
-                                                                    let mut error_response = serde_json::json!({
-                                                                        "type": "error",
-                                                                        "message": format!("ORM query failed: {}", e)
-                                                                    });
+                                                                if let Some(ref qid) = query_id {
+                                                                    error_response["query_id"] = serde_json::Value::String(qid.clone());
+                                                                }
 
-                                                                    if let Some(ref qid) = query_id {
-                                                                        error_response["query_id"] = serde_json::Value::String(qid.clone());
-                                                                    }
-
-                                                                    if let Err(send_err) = sender_clone.send(error_response).await {
-                                                                        warn!("Failed to send ORM error to challenge: {}", send_err);
-                                                                    }
+                                                                if let Err(send_err) = sender_clone.send(error_response).await {
+                                                                    warn!("Failed to send ORM error to challenge: {}", send_err);
                                                                 }
                                                             }
                                                         } else {
@@ -573,7 +925,10 @@ impl ChallengeManager {
                                             }
                                         }
                                     }
-                                }).await;
+                                },
+                                Some(on_ready_cb),
+                                Some(on_disconnect_cb)
+                            ).await;
                             });
 
                             // Mark ws_started
@@ -905,7 +1260,200 @@ impl ChallengeManager {
         Ok(())
     }
 
-    /// Check provisioning status
+    /// Provision a Docker container for a challenge (dev mode)
+    async fn provision_docker_container(&self, spec: ChallengeSpec) -> Result<()> {
+        let compose_hash_clone = spec.compose_hash.clone();
+
+        info!("Attempting to provision Docker container for challenge {} (use_docker: {}, docker_client available: {})", 
+            compose_hash_clone, self.use_docker, self.docker_client.is_some());
+
+        // Check if Docker client is available
+        let docker_client = match &self.docker_client {
+            Some(client) => {
+                info!(
+                    "Docker client is available for challenge {}",
+                    compose_hash_clone
+                );
+                client
+            }
+            None => {
+                error!(
+                    "Docker client not available for challenge {} (use_docker: {})",
+                    compose_hash_clone, self.use_docker
+                );
+                let mut challenges = self.challenges.write().await;
+                if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
+                    instance.state = ChallengeState::Failed;
+                }
+                return Err(anyhow::anyhow!(
+                    "Docker client not available (use_docker: {}, client initialized: {})",
+                    self.use_docker,
+                    false
+                ));
+            }
+        };
+
+        // Update state to Provisioning
+        {
+            let mut challenges = self.challenges.write().await;
+            if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
+                instance.state = ChallengeState::Provisioning;
+            }
+        }
+
+        // Get image from spec (first image in the list)
+        let image = spec
+            .images
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No image specified in challenge spec"))?
+            .clone();
+
+        info!(
+            "Provisioning Docker container for challenge {} with image: {}",
+            compose_hash_clone, image
+        );
+
+        // Ensure Docker network exists (lazy initialization)
+        if let Err(e) = docker_client.ensure_network().await {
+            error!("Failed to ensure Docker network exists: {}", e);
+            return Err(anyhow::anyhow!("Failed to ensure Docker network: {}", e));
+        }
+
+        // Build environment variables
+        let mut env_vars = HashMap::new();
+
+        // Add spec environment variables
+        for (key, value) in &spec.env {
+            env_vars.insert(key.clone(), value.clone());
+        }
+
+        // Add required system environment variables
+        env_vars.insert("ENVIRONMENT_MODE".to_string(), "dev".to_string());
+        env_vars.insert("CHALLENGE_ID".to_string(), spec.name.clone());
+        env_vars.insert(
+            "PLATFORM_API_URL".to_string(),
+            std::env::var("PLATFORM_BASE_API")
+                .unwrap_or_else(|_| "http://platform-api:15000".to_string()),
+        );
+
+        // Add dev mode environment variables for challenge SDK
+        // These are required for the challenge SDK to use mock quotes instead of trying dstack SDK
+        let validator_mock_vmm =
+            std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true";
+
+        if validator_mock_vmm {
+            // Validator is in dev mode, so challenge should also use dev mode
+            env_vars.insert("SDK_DEV_MODE".to_string(), "true".to_string());
+            env_vars.insert("TEE_ENFORCED".to_string(), "false".to_string());
+
+            // Pass TDX_SIMULATION_MODE from validator to challenge
+            // This controls whether mock TDX attestation is used (encryption is always enabled)
+            let tdx_simulation_mode =
+                std::env::var("TDX_SIMULATION_MODE").unwrap_or_else(|_| "true".to_string()); // Default to true in dev mode
+
+            env_vars.insert(
+                "TDX_SIMULATION_MODE".to_string(),
+                tdx_simulation_mode.clone(),
+            );
+
+            info!("Setting dev mode environment variables for challenge container (SDK_DEV_MODE=true, TEE_ENFORCED=false, TDX_SIMULATION_MODE={})", 
+                tdx_simulation_mode);
+        }
+
+        // Get or prompt for private environment variables
+        let private_env_vars = get_or_prompt_env_vars(
+            &self.dynamic_values,
+            &compose_hash_clone,
+            &spec.name,
+            spec.github_repo.as_ref(),
+        )
+        .await
+        .context("Failed to get or prompt for private environment variables")?;
+
+        // Add private environment variables
+        for (key, value) in private_env_vars {
+            env_vars.insert(key, value);
+        }
+
+        // Build port mappings
+        let mut port_mappings = Vec::new();
+        for port in &spec.ports {
+            port_mappings.push(DockerPortMapping {
+                container_port: port.container,
+                host_port: None, // Let Docker assign random port
+                protocol: port.protocol.clone(),
+            });
+        }
+
+        // Default port if none specified (challenge SDK typically uses 10000)
+        if port_mappings.is_empty() {
+            port_mappings.push(DockerPortMapping {
+                container_port: 10000,
+                host_port: None,
+                protocol: "tcp".to_string(),
+            });
+        }
+
+        // Create container configuration
+        let container_name = format!("challenge-{}", compose_hash_clone);
+        let container_config = ContainerConfig {
+            name: container_name.clone(),
+            image,
+            env: env_vars,
+            ports: port_mappings,
+            network: self.docker_network.clone(),
+            restart_policy: "unless-stopped".to_string(),
+        };
+
+        // Create and start container
+        match docker_client
+            .create_and_start_container(container_config)
+            .await
+        {
+            Ok(container_id) => {
+                info!("✅ Docker container {} created and started", container_name);
+
+                // Wait a bit for container to initialize
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                // Get container IP address
+                let container_ip = docker_client
+                    .get_container_ip(&container_name)
+                    .await
+                    .context("Failed to get container IP")?;
+
+                let http_url = if let Some(ip) = container_ip {
+                    // Use container IP and default port
+                    format!("http://{}:10000", ip)
+                } else {
+                    // Fallback: use container name in network
+                    format!("http://{}:10000", container_name)
+                };
+
+                // Update challenge instance
+                let mut challenges = self.challenges.write().await;
+                if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
+                    instance.cvm_instance_id = Some(container_id);
+                    instance.challenge_api_url = Some(http_url.clone());
+                    instance.state = ChallengeState::Probing;
+                }
+
+                info!("Docker container {} ready at {}", container_name, http_url);
+            }
+            Err(e) => {
+                error!("Failed to provision Docker container: {}", e);
+                let mut challenges = self.challenges.write().await;
+                if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
+                    instance.state = ChallengeState::Failed;
+                }
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check provisioning status (VMM)
     async fn check_provisioning_status(&self, compose_hash: &str, cvm_id: &str) -> Result<()> {
         match self.vmm_client.get_vm_info(cvm_id).await {
             Ok(info) => {
@@ -925,8 +1473,111 @@ impl ChallengeManager {
         Ok(())
     }
 
+    /// Check Docker container provisioning status
+    async fn check_docker_provisioning_status(
+        &self,
+        compose_hash: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        let docker_client = match &self.docker_client {
+            Some(client) => client,
+            None => {
+                error!("Docker client not available");
+                return Err(anyhow::anyhow!("Docker client not available"));
+            }
+        };
+
+        let container_name = format!("challenge-{}", compose_hash);
+        match docker_client.is_container_running(&container_name).await {
+            Ok(true) => {
+                let mut challenges = self.challenges.write().await;
+                if let Some(instance) = challenges.get_mut(compose_hash) {
+                    instance.state = ChallengeState::Probing;
+                    info!(
+                        "Docker container {} is running, starting health probe",
+                        container_name
+                    );
+                }
+            }
+            Ok(false) => {
+                warn!("Docker container {} is not running", container_name);
+            }
+            Err(e) => {
+                error!("Failed to check Docker container status: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Probe health of challenge CVM
     async fn probe_health(&self, compose_hash: &str, api_url: &str) -> Result<()> {
+        // Detect if this is a Docker container (HTTP URL) or VMM CVM (HTTPS URL)
+        let is_docker = api_url.starts_with("http://") && !api_url.starts_with("https://");
+
+        if is_docker {
+            // Docker container: simple HTTP health check without instance_id logic
+            info!(
+                "Probing Docker container health for challenge {} at {}",
+                compose_hash, api_url
+            );
+
+            let mut challenges = self.challenges.write().await;
+            if let Some(instance) = challenges.get_mut(compose_hash) {
+                instance.last_probe = Some(Utc::now());
+                instance.probe_attempts += 1;
+            }
+            drop(challenges);
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()?;
+
+            let probe_start = std::time::Instant::now();
+            let probe_timeout = std::time::Duration::from_secs(30); // Shorter timeout for Docker
+            let mut healthy = false;
+
+            while !healthy && probe_start.elapsed() < probe_timeout {
+                match client.get(&format!("{}/sdk/health", api_url)).send().await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            healthy = true;
+                            let mut challenges = self.challenges.write().await;
+                            if let Some(instance) = challenges.get_mut(compose_hash) {
+                                instance.state = ChallengeState::Active;
+                                instance.probe_attempts = 0;
+                                info!("Challenge {} is healthy (Docker)", compose_hash);
+                                info!("✅ Challenge {} is ready", compose_hash);
+                            }
+                            break;
+                        } else {
+                            debug!(
+                                "Health check returned status {} for {}",
+                                response.status(),
+                                api_url
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Health check error for {}: {}", api_url, e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+
+            if !healthy {
+                let mut challenges = self.challenges.write().await;
+                if let Some(instance) = challenges.get_mut(compose_hash) {
+                    warn!("Challenge {} health probe failed after 30s: error sending request for url ({}/sdk/health)", compose_hash, api_url);
+                    instance.state = ChallengeState::Failed;
+                }
+            }
+
+            return Ok(());
+        }
+
+        // VMM CVM: original logic with instance_id handling
         let mut challenges = self.challenges.write().await;
 
         // Check if instance_id is empty (URL starts with - after https://)
@@ -1119,6 +1770,30 @@ impl ChallengeManager {
                     warn!("Challenge {} health probe failed after 120s: error sending request for url ({}/sdk/health)", compose_hash, api_url_clone);
                     // Mark as failed after 120s of retries
                     instance.state = ChallengeState::Failed;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Cleanup all Docker containers created by this validator
+    pub async fn cleanup_docker_containers(&self) -> Result<()> {
+        if !self.use_docker {
+            return Ok(());
+        }
+
+        if let Some(docker_client) = &self.docker_client {
+            info!("Cleaning up all Docker containers created by validator...");
+            match docker_client
+                .cleanup_containers_by_prefix("challenge-")
+                .await
+            {
+                Ok(count) => {
+                    info!("Cleaned up {} Docker containers", count);
+                }
+                Err(e) => {
+                    warn!("Failed to cleanup Docker containers: {}", e);
                 }
             }
         }

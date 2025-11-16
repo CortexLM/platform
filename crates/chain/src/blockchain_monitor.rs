@@ -19,7 +19,7 @@ pub struct NetworkHyperparameters {
 impl Default for NetworkHyperparameters {
     fn default() -> Self {
         Self {
-            tempo: 360, // Default tempo
+            tempo: 360,                  // Default tempo
             weights_set_rate_limit: 100, // Default rate limit
             current_block: 0,
             last_update: None,
@@ -51,7 +51,7 @@ impl BlockchainMonitor {
     /// Get network hyperparameters (cached)
     pub async fn get_hyperparameters(&self) -> Result<NetworkHyperparameters> {
         let current_block = ChainClient::get_current_block(&*self.client).await?;
-        
+
         // Check if cache is still valid
         let cache_valid = {
             let last_block = self.last_cache_block.read().await;
@@ -139,7 +139,7 @@ impl BlockchainMonitor {
         if tempo == 0 {
             return u64::MAX; // No epoch defined
         }
-        
+
         let tempo_u64 = tempo as u64;
         let remainder = current_block % tempo_u64;
         tempo_u64 - remainder
@@ -206,31 +206,27 @@ impl BlockchainMonitor {
         // if let Ok(Some(last_update)) = last_update_for_uid(&bittensor_client, self.netuid, validator_uid).await {
         //     return Ok(Some(last_update));
         // }
-        
+
         // For now, try to get from cached hyperparameters or return None
         // This indicates no previous update, which allows first submission
         Ok(None)
     }
 
     /// Check if rate limit allows weight submission
-    pub async fn can_submit_weights(
-        &self,
-        validator_uid: u16,
-        current_block: u64,
-    ) -> Result<bool> {
+    pub async fn can_submit_weights(&self, validator_uid: u16, current_block: u64) -> Result<bool> {
         let hyperparams = self.get_hyperparameters().await?;
-        
+
         if let Some(last_update) = self.get_last_update_block(validator_uid).await? {
             let blocks_since_update = current_block.saturating_sub(last_update);
             let can_submit = blocks_since_update >= hyperparams.weights_set_rate_limit;
-            
+
             if !can_submit {
                 info!(
                     "Rate limit active: {} blocks since last update, need {} blocks",
                     blocks_since_update, hyperparams.weights_set_rate_limit
                 );
             }
-            
+
             return Ok(can_submit);
         }
 
@@ -246,16 +242,19 @@ mod tests {
     #[test]
     fn test_blocks_until_next_epoch() {
         let monitor = BlockchainMonitor::new(
-            Arc::new(SubtensorClient::new("http://localhost".to_string(), "test".to_string())),
+            Arc::new(SubtensorClient::new(
+                "http://localhost".to_string(),
+                "test".to_string(),
+            )),
             1,
         );
 
         // Test with tempo = 10, current_block = 5
         assert_eq!(monitor.blocks_until_next_epoch(10, 5), 5);
-        
+
         // Test with tempo = 10, current_block = 10 (at epoch boundary)
         assert_eq!(monitor.blocks_until_next_epoch(10, 10), 10);
-        
+
         // Test with tempo = 10, current_block = 9
         assert_eq!(monitor.blocks_until_next_epoch(10, 9), 1);
 
@@ -266,13 +265,16 @@ mod tests {
     #[test]
     fn test_is_in_admin_freeze_window() {
         let monitor = BlockchainMonitor::new(
-            Arc::new(SubtensorClient::new("http://localhost".to_string(), "test".to_string())),
+            Arc::new(SubtensorClient::new(
+                "http://localhost".to_string(),
+                "test".to_string(),
+            )),
             1,
         );
 
         // At block 8 with tempo 10, freeze window 2: blocks_until_epoch = 2, should be in freeze
         assert!(monitor.is_in_admin_freeze_window(10, 8, 2));
-        
+
         // At block 7 with tempo 10, freeze window 2: blocks_until_epoch = 3, should NOT be in freeze
         assert!(!monitor.is_in_admin_freeze_window(10, 7, 2));
 
@@ -283,7 +285,10 @@ mod tests {
     #[test]
     fn test_calculate_optimal_submission_block() {
         let monitor = BlockchainMonitor::new(
-            Arc::new(SubtensorClient::new("http://localhost".to_string(), "test".to_string())),
+            Arc::new(SubtensorClient::new(
+                "http://localhost".to_string(),
+                "test".to_string(),
+            )),
             1,
         );
 
@@ -298,4 +303,3 @@ mod tests {
         assert_eq!(optimal, 4);
     }
 }
-

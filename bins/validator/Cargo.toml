@@ -73,6 +73,9 @@ uuid = { workspace = true }
 serde_yaml = "0.9"
 toml = "0.8"
 
+# Docker client
+bollard = "0.19"
+
 # Interactive prompts
 dialoguer = "0.11"
 rpassword = "7.3"

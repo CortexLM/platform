@@ -75,9 +75,7 @@ impl MechanismWeightAggregator {
 
     /// Apply winner-takes-all logic for term-challenge
     /// Returns weights with 100% (1.0) to the miner with highest accuracy/weight
-    fn apply_winner_takes_all(
-        raw_weights: &HashMap<String, f64>,
-    ) -> HashMap<String, f64> {
+    fn apply_winner_takes_all(raw_weights: &HashMap<String, f64>) -> HashMap<String, f64> {
         if raw_weights.is_empty() {
             return HashMap::new();
         }
@@ -148,7 +146,8 @@ impl MechanismWeightAggregator {
                 if !other_challenges.is_empty() {
                     // Aggregate other challenges weighted by emission share
                     let mut other_aggregated: HashMap<String, f64> = HashMap::new();
-                    let other_emission: f64 = other_challenges.iter().map(|c| c.emission_share).sum();
+                    let other_emission: f64 =
+                        other_challenges.iter().map(|c| c.emission_share).sum();
                     let term_emission = term_challenge.emission_share;
                     let total_emission = other_emission + term_emission;
 

@@ -74,9 +74,7 @@ impl VmmClient {
             == "true";
 
         if mock_mode {
-            tracing::debug!(
-                "MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)"
-            );
+            tracing::debug!("MOCK VMM MODE: VMM operations will be mocked (no real CVMs created)");
         }
 
         Self {

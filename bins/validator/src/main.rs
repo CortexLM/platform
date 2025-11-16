@@ -1,16 +1,21 @@
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as base64_engine, Engine as _};
 use dstack_sdk::dstack_client::DstackClient;
+use hex;
 use platform_engine_api_client::PlatformClient;
+use rand::RngCore;
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 mod challenge_manager;
 mod challenge_ws;
 mod config;
 mod cvm_quota;
+mod docker_client;
 mod dstack_provisioner;
 mod env_prompt;
 mod epoch_manager;
@@ -71,8 +76,7 @@ async fn main() -> Result<()> {
     // Initialize job manager
     let job_manager = Arc::new(RwLock::new(JobManager::new(client.clone(), config.clone())));
 
-    // Initialize executor
-    let executor = Arc::new(RwLock::new(DstackExecutor::new(config.clone())?));
+    // Executor will be initialized after challenge_manager is created
 
     // Initialize CVM quota manager with capacity from config
     let capacity = crate::cvm_quota::ResourceCapacity {
@@ -86,13 +90,58 @@ async fn main() -> Result<()> {
     let vmm_url = config.dstack_vmm_url.clone();
     // Note: vmm_client is created inside ChallengeManager, not needed here
 
+    // Initialize Docker client if in dev mode
+    info!(
+        "Checking Docker mode: use_docker={}, VALIDATOR_MOCK_VMM={:?}, ENVIRONMENT_MODE={:?}",
+        config.use_docker,
+        std::env::var("VALIDATOR_MOCK_VMM").ok(),
+        std::env::var("ENVIRONMENT_MODE").ok()
+    );
+
+    let docker_client = if config.use_docker {
+        info!(
+            "Initializing Docker client for dev mode (socket: {:?}, network: {})",
+            config.docker_socket_path, config.docker_network
+        );
+        match crate::docker_client::DockerClient::new(
+            config.docker_socket_path.clone(),
+            config.docker_network.clone(),
+        )
+        .await
+        {
+            Ok(client) => {
+                info!("✅ Docker client initialized successfully");
+                Some(Arc::new(client))
+            }
+            Err(e) => {
+                error!(
+                    "Failed to initialize Docker client: {}. Continuing without Docker support.",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        warn!("Docker mode is disabled. Set VALIDATOR_MOCK_VMM=true or ENVIRONMENT_MODE=dev to enable.");
+        None
+    };
+
     // Initialize challenge manager
     let challenge_manager = Arc::new(ChallengeManager::new(
         client.clone(),
         vmm_url.clone(),
         cvm_quota_manager.clone(),
         dynamic_values_manager.clone(),
+        docker_client,
+        config.docker_network.clone(),
+        config.use_docker,
     ));
+
+    // Initialize executor with challenge_manager
+    let executor = Arc::new(RwLock::new(DstackExecutor::new(
+        config.clone(),
+        challenge_manager.clone(),
+    )?));
 
     // Initialize chain components (stub for now - will be fully integrated later)
     // Initialize SubtensorClient and BlockSyncManager for epoch-based weight setting
@@ -151,12 +200,13 @@ async fn main() -> Result<()> {
                 let keypair = keypair_clone.clone();
                 let challenge_manager = challenge_manager_clone.clone();
 
-                // Set status sender on first message
+                // Set status sender and platform WebSocket sender on first message
                 tokio::spawn({
                     let challenge_manager = challenge_manager.clone();
                     let sender = sender.clone();
                     async move {
-                        challenge_manager.set_status_sender(sender).await;
+                        challenge_manager.set_status_sender(sender.clone()).await;
+                        challenge_manager.set_platform_ws_sender(sender).await;
                     }
                 });
 
@@ -297,9 +347,31 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Keep main thread alive
-    tokio::signal::ctrl_c().await?;
+    // Keep main thread alive and handle shutdown signals
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    tokio::select! {
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down validator");
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT (Ctrl+C), shutting down validator");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down validator");
+        }
+    }
+
     info!("Shutting down validator");
+
+    // Cleanup Docker containers before exiting
+    if config.use_docker {
+        info!("Cleaning up Docker containers...");
+        if let Err(e) = challenge_manager.cleanup_docker_containers().await {
+            warn!("Error cleaning up Docker containers: {}", e);
+        }
+    }
 
     Ok(())
 }
@@ -312,7 +384,7 @@ async fn handle_websocket_message(
     keypair: Arc<sp_core::sr25519::Pair>,
     challenge_manager: Arc<ChallengeManager>,
 ) -> Result<()> {
-    info!("Handling WebSocket message: {}", message);
+    // (Logging removed for verbosity)
 
     // Parse message JSON
     let msg_json: serde_json::Value = serde_json::from_str(&message)?;
@@ -347,12 +419,13 @@ async fn handle_websocket_message(
                 return Ok(());
             }
 
-            info!("Received challenge from platform-api: {}", challenge);
+            // Check if we're in dev mode
+            let dev_mode = msg_json["dev_mode"].as_bool().unwrap_or(false);
 
-            // Get TDX attestation from dstack guest agent
-            // The validator is running in a TDX CVM, so we can get the quote
-            // Use Unix socket if mounted, otherwise try HTTP
-            let dstack_client = DstackClient::new(None); // Uses /var/run/dstack.sock by default
+            info!(
+                "Received challenge from platform-api: {} (dev_mode: {})",
+                challenge, dev_mode
+            );
 
             // Use the challenge as report_data to bind attestation to the challenge
             let challenge_bytes =
@@ -366,60 +439,167 @@ async fn handle_websocket_message(
                 hasher.finalize().to_vec()
             };
 
-            match dstack_client.get_quote(report_data).await {
-                Ok(quote_response) => {
-                    info!("Generated TDX quote successfully");
-                    info!("Quote: {} chars", quote_response.quote.len());
-                    info!("Event log: {} chars", quote_response.event_log.len());
+            if dev_mode {
+                // Dev mode: Generate mock attestation with compose_hash from challenge
+                info!("DEV MODE: Generating mock TDX attestation");
 
-                    // Verify that the report_data in the quote matches the challenge
-                    let received_report_data = hex::encode(&quote_response.report_data);
-                    info!(
-                        "Received report_data from TDX quote: {}",
-                        received_report_data
-                    );
-                    info!("Expected challenge: {}", challenge);
+                // Get compose_hash from environment or use default for term-challenge
+                let compose_hash = std::env::var("CHALLENGE_COMPOSE_HASH")
+                    .unwrap_or_else(|_| "term-challenge-dev-001".to_string());
 
-                    // Send attestation back via WebSocket to platform-api (SIGNED)
-                    match SecureMessage::attestation_response(
-                        quote_response.quote,
-                        quote_response.event_log,
-                        quote_response.report_data,
-                        quote_response.vm_config,
-                        challenge.to_string(),
-                        &keypair,
-                    ) {
-                        Ok(secure_msg) => {
-                            if let Ok(msg_str) = serde_json::to_string(&secure_msg) {
-                                if let Err(e) = sender.send(msg_str).await {
-                                    error!("Failed to send attestation via WebSocket: {}", e);
-                                } else {
-                                    info!("Attestation sent successfully to platform-api (signed)");
-                                }
-                            } else {
-                                error!("Failed to serialize attestation message");
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to create secure attestation message: {}", e);
-                        }
+                info!("Using compose_hash for mock attestation: {}", compose_hash);
+
+                // Generate mock quote with report_data embedded
+                let mut mock_quote = vec![0u8; 1024];
+                rand::thread_rng().fill_bytes(&mut mock_quote);
+
+                // Embed report_data at known offsets (must match platform-api verification offsets)
+                // Platform-api checks: [568, 576, 584]
+                let report_offsets: [usize; 3] = [568, 576, 584];
+                for offset in &report_offsets {
+                    if mock_quote.len() >= *offset + 32 {
+                        mock_quote[*offset..*offset + 32].copy_from_slice(&report_data);
+                        break;
                     }
                 }
-                Err(e) => {
-                    error!("Failed to generate TDX attestation: {}", e);
 
-                    // Send error response (SIGNED)
-                    if let Ok(error_msg) = SecureMessage::error(e.to_string(), &keypair) {
-                        if let Ok(msg_str) = serde_json::to_string(&error_msg) {
-                            let _ = sender.send(msg_str).await;
+                // Convert quote to base64
+                let quote_b64 = base64_engine.encode(&mock_quote);
+
+                // Generate app_id and instance_id
+                // Use the hotkey (ss58 address) for app_id
+                use sp_core::crypto::{Pair, Ss58Codec};
+                let hotkey = Pair::public(keypair.as_ref()).to_ss58check();
+                let app_id = format!("validator-{}", &hotkey[..16.min(hotkey.len())]);
+                let instance_id = format!("instance-{}", &Uuid::new_v4().to_string()[..8]);
+
+                // Create event log with compose_hash
+                let event_log = serde_json::json!([
+                    {
+                        "imr": 3,
+                        "event_type": 1,
+                        "event": "app-id",
+                        "event_payload": app_id,
+                    },
+                    {
+                        "imr": 3,
+                        "event_type": 2,
+                        "event": "instance-id",
+                        "event_payload": instance_id,
+                    },
+                    {
+                        "imr": 3,
+                        "event_type": 3,
+                        "event": "compose-hash",
+                        "event_payload": compose_hash,
+                    },
+                    {
+                        "imr": 3,
+                        "event_type": 4,
+                        "event": "dev-mode",
+                        "event_payload": "true",
+                    }
+                ])
+                .to_string();
+
+                // Convert report_data to hex string
+                let report_data_hex = hex::encode(&report_data);
+
+                info!(
+                    "Generated mock TDX attestation with compose_hash: {}",
+                    compose_hash
+                );
+
+                // Send mock attestation back via WebSocket to platform-api (SIGNED)
+                match SecureMessage::attestation_response(
+                    quote_b64,
+                    event_log,
+                    report_data_hex,
+                    "{}".to_string(), // vm_config (empty JSON for mock)
+                    challenge.to_string(),
+                    &keypair,
+                ) {
+                    Ok(secure_msg) => {
+                        if let Ok(msg_str) = serde_json::to_string(&secure_msg) {
+                            if let Err(e) = sender.send(msg_str).await {
+                                error!("Failed to send mock attestation via WebSocket: {}", e);
+                            } else {
+                                info!(
+                                    "Mock attestation sent successfully to platform-api (signed)"
+                                );
+                            }
+                        } else {
+                            error!("Failed to serialize mock attestation message");
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create secure mock attestation message: {}", e);
+                    }
+                }
+            } else {
+                // Production mode: Get real TDX attestation from dstack guest agent
+                let dstack_client = DstackClient::new(None); // Uses /var/run/dstack.sock by default
+
+                match dstack_client.get_quote(report_data).await {
+                    Ok(quote_response) => {
+                        info!("Generated TDX quote successfully");
+                        info!("Quote: {} chars", quote_response.quote.len());
+                        info!("Event log: {} chars", quote_response.event_log.len());
+
+                        // Verify that the report_data in the quote matches the challenge
+                        let received_report_data = hex::encode(&quote_response.report_data);
+                        info!(
+                            "Received report_data from TDX quote: {}",
+                            received_report_data
+                        );
+                        info!("Expected challenge: {}", challenge);
+
+                        // Send attestation back via WebSocket to platform-api (SIGNED)
+                        match SecureMessage::attestation_response(
+                            quote_response.quote,
+                            quote_response.event_log,
+                            quote_response.report_data,
+                            quote_response.vm_config,
+                            challenge.to_string(),
+                            &keypair,
+                        ) {
+                            Ok(secure_msg) => {
+                                if let Ok(msg_str) = serde_json::to_string(&secure_msg) {
+                                    if let Err(e) = sender.send(msg_str).await {
+                                        error!("Failed to send attestation via WebSocket: {}", e);
+                                    } else {
+                                        info!("Attestation sent successfully to platform-api (signed)");
+                                    }
+                                } else {
+                                    error!("Failed to serialize attestation message");
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to create secure attestation message: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to generate TDX attestation: {}", e);
+
+                        // Send error response (SIGNED)
+                        if let Ok(error_msg) = SecureMessage::error(e.to_string(), &keypair) {
+                            if let Ok(msg_str) = serde_json::to_string(&error_msg) {
+                                let _ = sender.send(msg_str).await;
+                            }
                         }
                     }
                 }
             }
         }
+        "orm_result" => {
+            // (Logging removed for verbosity)
+            let query_id = msg_json["query_id"].as_str().map(|s| s.to_string());
+            challenge_manager.handle_orm_result(msg_json.clone(), query_id).await;
+        }
         _ => {
             // Handle other message types
-            info!("Received message type: {}", msg_type);
+            // (Logging removed for verbosity)
         }
     }
 

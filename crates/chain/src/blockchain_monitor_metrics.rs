@@ -97,7 +97,10 @@ impl WeightSyncMetricsCollector {
         }
 
         // Update error distribution
-        *metrics.error_distribution.entry(error_type.to_string()).or_insert(0) += 1;
+        *metrics
+            .error_distribution
+            .entry(error_type.to_string())
+            .or_insert(0) += 1;
 
         // Update history
         let mut history = self.submission_history.write().await;
@@ -140,10 +143,7 @@ impl WeightSyncMetricsCollector {
         metrics: &mut WeightSyncMetrics,
         history: &[SubmissionRecord],
     ) {
-        let successful: Vec<_> = history
-            .iter()
-            .filter(|r| r.success)
-            .collect();
+        let successful: Vec<_> = history.iter().filter(|r| r.success).collect();
 
         if successful.len() >= 2 {
             let mut block_diffs = Vec::new();
@@ -192,4 +192,3 @@ impl Default for WeightSyncMetricsCollector {
         Self::new()
     }
 }
-
