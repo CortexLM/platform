@@ -46,32 +46,7 @@ Platform Network consists of several interconnected components that work togethe
 
 </div>
 
-## Quick Start
-
-> [!NOTE]
-> Platform Validator requires Rust 1.70 or higher and access to a dstack VMM instance.
-
-Install and build the validator:
-
-```console
-git clone https://github.com/PlatformNetwork/platform-validator.git
-cd platform-validator
-cargo build --release
-```
-
-Configure and run:
-
-```bash
-export VALIDATOR_HOTKEY="5DD..."
-export PLATFORM_BASE_API="http://platform-api:3000"
-export DSTACK_VMM_URL="http://dstack-vmm:11530"
-export VALIDATOR_CPU_CORES=4
-export VALIDATOR_MEMORY_MB=2048
-
-./target/release/validator
-```
-
-See [Getting Started](docs/getting-started.md) for detailed installation and configuration instructions.
+## TODO Documentation
 
 ## Documentation
 
