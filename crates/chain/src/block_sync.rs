@@ -2,13 +2,14 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::subtensor_client::{MetagraphState, SubtensorClient};
 
 /// Block synchronization manager for 360-block cycles
 pub struct BlockSyncManager {
-    client: SubtensorClient,
+    client: Arc<SubtensorClient>,
     current_block: u64,
     block_modulus: u64,
     last_sync_block: u64,
@@ -25,7 +26,7 @@ pub struct SyncBlockInfo {
 }
 
 impl BlockSyncManager {
-    pub fn new(client: SubtensorClient) -> Self {
+    pub fn new(client: Arc<SubtensorClient>) -> Self {
         Self {
             client,
             current_block: 0,
@@ -39,7 +40,7 @@ impl BlockSyncManager {
     /// Update current block and check if sync is needed
     pub async fn update_block(&mut self, block_number: u64) -> Result<SyncBlockInfo> {
         self.current_block = block_number;
-        self.client.set_block(block_number);
+        self.client.set_block(block_number).await;
 
         let sync_block = self.get_sync_block();
         let blocks_until_sync = self.modulus_distance_to_sync();
@@ -157,6 +158,14 @@ impl BlockSyncManager {
             weights_locked: self.weights_locked,
         }
     }
+
+    /// Sync current block from SubtensorClient
+    /// This should be called periodically to keep BlockSyncManager in sync with the blockchain
+    pub async fn sync_block_from_client(&mut self) -> Result<SyncBlockInfo> {
+        use crate::types::ChainClient;
+        let client_block = self.client.get_current_block().await?;
+        self.update_block(client_block).await
+    }
 }
 
 /// Metagraph synchronization manager
@@ -167,7 +176,7 @@ pub struct MetagraphSyncManager {
 }
 
 impl MetagraphSyncManager {
-    pub fn new(client: SubtensorClient) -> Self {
+    pub fn new(client: Arc<SubtensorClient>) -> Self {
         Self {
             block_sync: BlockSyncManager::new(client),
             metagraph: None,

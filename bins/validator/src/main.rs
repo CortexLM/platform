@@ -37,6 +37,7 @@ use hotkey::get_keypair_from_mnemonic;
 use job_manager::JobManager;
 use network_proxy::{create_network_policy, NetworkProxy};
 use platform_engine_dynamic_values::DynamicValuesManager;
+use platform_engine_chain::{BlockSyncManager, SubtensorClient};
 use platform_verifier::PlatformVerifier;
 use secure_message::SecureMessage;
 
@@ -143,16 +144,71 @@ async fn main() -> Result<()> {
         challenge_manager.clone(),
     )?));
 
-    // Initialize chain components (stub for now - will be fully integrated later)
-    // Initialize SubtensorClient and BlockSyncManager for epoch-based weight setting
+    // Initialize chain components for epoch-based weight setting
     let epoch_config = epoch_manager::EpochConfig::default();
     info!(
         "Epoch manager configured with {} block intervals",
         epoch_config.block_interval
     );
 
-    // Note: Full epoch manager initialization will be added when chain integration is complete
-    // For now, we have the structure in place for weight collection and submission
+    // Initialize SubtensorClient (using default endpoint for now)
+    let subtensor_endpoint = std::env::var("SUBTENSOR_ENDPOINT")
+        .unwrap_or_else(|_| "wss://entrypoint-finney.opentensor.ai:443".to_string());
+    let subtensor_network = std::env::var("SUBTENSOR_NETWORK")
+        .unwrap_or_else(|_| "finney".to_string());
+    let subtensor_client = Arc::new(SubtensorClient::new(
+        subtensor_endpoint.clone(),
+        subtensor_network.clone(),
+    ));
+
+    // Initialize BlockSyncManager
+    let block_sync_manager = Arc::new(RwLock::new(BlockSyncManager::new(
+        subtensor_client.clone(),
+    )));
+
+    // Get netuid from environment or use default
+    let netuid: u16 = std::env::var("NETUID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+
+    // Initialize EpochManager
+    let validator_config_for_epoch = config.clone();
+    let epoch_manager = Arc::new(epoch_manager::EpochManager::new(
+        epoch_config,
+        validator_config_for_epoch,
+        block_sync_manager.clone(),
+        challenge_manager.clone(),
+        subtensor_client.clone(),
+        client.clone(),
+        netuid,
+    ));
+
+    // Start block listener (connects to blockchain and listens for new blocks)
+    if let Err(e) = subtensor_client.start_block_listener().await {
+        warn!("Failed to start block listener: {}. Will use simulated blocks.", e);
+    } else {
+        info!("✅ Block listener started - listening to blockchain for new blocks");
+    }
+
+    // Start block sync task (syncs BlockSyncManager with SubtensorClient every 12 seconds)
+    let block_sync_manager_for_sync = block_sync_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(12));
+        loop {
+            interval.tick().await;
+            
+            let mut block_sync = block_sync_manager_for_sync.write().await;
+            if let Err(e) = block_sync.sync_block_from_client().await {
+                warn!("Failed to sync block from client: {}", e);
+            }
+        }
+    });
+    info!("✅ Block sync task started - syncing with blockchain every 12s");
+
+    // Start epoch manager monitoring loop
+    epoch_manager::spawn_epoch_manager(epoch_manager);
+    info!("✅ Epoch manager started and monitoring for weight submission");
 
     // Start background task to recompute quota reservations every 5s
     let challenge_manager_for_quota = challenge_manager.clone();

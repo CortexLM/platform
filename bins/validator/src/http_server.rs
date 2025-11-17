@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
@@ -165,7 +165,7 @@ pub async fn start_http_server(
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(Duration::from_secs(0))
                 .as_secs();
             let mut sessions = sessions_gc.write().await;
             let mut purge_count = 0;
@@ -870,7 +870,7 @@ async fn attest(
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(Duration::from_secs(0))
             .as_secs();
         match verify(&quote_bytes, &collateral_data, now) {
             Ok(tcb) => {

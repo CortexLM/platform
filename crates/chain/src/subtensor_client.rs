@@ -3,7 +3,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tracing::{info, warn};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
 use crate::types::{
     ChainClient, ChainMetadata, SubnetInfo, ValidatorInfo, ValidatorSet, WeightSubmission,
@@ -15,7 +17,7 @@ pub struct SubtensorClient {
     endpoint: String,
     network: String,
     metadata: ChainMetadata,
-    current_block: u64,
+    current_block: Arc<RwLock<u64>>,
     block_modulus: u64, // 360 blocks
 }
 
@@ -48,8 +50,85 @@ impl SubtensorClient {
             endpoint,
             network,
             metadata,
-            current_block: 0,
+            current_block: Arc::new(RwLock::new(0)),
             block_modulus: 360, // Block weights updated every 360 blocks
+        }
+    }
+
+    /// Start listening to blockchain blocks using bittensor-rs
+    /// This will update current_block automatically as new blocks are finalized
+    pub async fn start_block_listener(&self) -> Result<()> {
+        use bittensor_rs::BittensorClient;
+
+        let endpoint = self.endpoint.clone();
+        let current_block = self.current_block.clone();
+
+        tokio::spawn(async move {
+            info!("Connecting to Subtensor at {} to listen for blocks", endpoint);
+
+            // Connect to Bittensor using bittensor-rs
+            let client = match BittensorClient::new(&endpoint).await {
+                Ok(client) => {
+                    info!("✅ Connected to Bittensor at {}", endpoint);
+                    client
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to Bittensor at {}: {}. Will retry...",
+                        endpoint, e
+                    );
+                    // Retry connection in a loop
+                    let mut retry_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                    loop {
+                        retry_interval.tick().await;
+                        match BittensorClient::new(&endpoint).await {
+                            Ok(client) => {
+                                info!("✅ Connected to Bittensor at {} after retry", endpoint);
+                                break client;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Retry failed to connect to Bittensor: {}. Will retry again...",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Use polling method to get blocks (subscribe_finalized_blocks not available in current bittensor-rs version)
+            info!("Using polling method to track finalized blocks");
+            Self::poll_blocks_fallback(client, current_block).await;
+        });
+
+        Ok(())
+    }
+
+    /// Fallback polling method if subscription fails
+    async fn poll_blocks_fallback(
+        client: bittensor_rs::BittensorClient,
+        current_block: Arc<RwLock<u64>>,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(12));
+        let mut last_block = 0u64;
+
+        loop {
+            interval.tick().await;
+
+            match client.block_number().await {
+                Ok(block) => {
+                    if block > last_block {
+                        let mut current = current_block.write().await;
+                        *current = block;
+                        last_block = block;
+                        debug!("Polled current block: {}", block);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to poll block number: {}", e);
+                }
+            }
         }
     }
 
@@ -85,18 +164,20 @@ impl SubtensorClient {
 
     /// Get metagraph state from Subtensor
     pub async fn get_metagraph(&self, netuid: u16) -> Result<MetagraphState> {
+        let current_block = *self.current_block.read().await;
         info!(
             "Fetching metagraph for subnet {} at block {}",
-            netuid, self.current_block
+            netuid, current_block
         );
 
         // Query Subtensor runtime API for metagraph
         // This uses the SubnetInfoRuntimeApi.get_selective_mechagraph call
         // Similar to bittensor's get_metagraph_info()
 
+        let current_block = *self.current_block.read().await;
         Ok(MetagraphState {
             netuid,
-            block: self.current_block,
+            block: current_block,
             validators: vec![],
             uids: BTreeMap::new(),
             total_stake: 0.0,
@@ -135,18 +216,19 @@ impl SubtensorClient {
 
     /// Update metagraph weights on sync blocks
     pub async fn update_weights_on_sync_block(
-        &mut self,
+        &self,
         weights: BTreeMap<String, f64>,
     ) -> Result<()> {
-        if !self.is_sync_block(self.current_block) {
+        let current_block = *self.current_block.read().await;
+        if !self.is_sync_block(current_block) {
             warn!(
                 "Not a sync block ({}), weights should remain unchanged",
-                self.current_block
+                current_block
             );
             return Ok(());
         }
 
-        info!("Sync block detected: {}", self.current_block);
+        info!("Sync block detected: {}", current_block);
         info!("Updating weights for {} miners", weights.len());
 
         // Convert weights to format expected by chain
@@ -173,10 +255,11 @@ impl SubtensorClient {
             weight_map.insert(uid.to_string(), *weight as f64);
         }
 
+        let current_block = *self.current_block.read().await;
         let submission = WeightSubmission {
             validator_hotkey: self.get_validator_hotkey()?,
             weights: weight_map,
-            nonce: self.current_block,
+            nonce: current_block,
             signature: None,
             timestamp: Utc::now(),
             metadata: None,
@@ -224,9 +307,10 @@ impl ChainClient for SubtensorClient {
         // - uids: list of UIDs
         // - weights: list of weight values
 
+        let current_block = *self.current_block.read().await;
         Ok(WeightSubmissionResult {
             transaction_hash: format!("0x{:016x}", Utc::now().timestamp_millis()),
-            block_number: self.current_block,
+            block_number: current_block,
             success: true,
             error: None,
             timestamp: Utc::now(),
@@ -262,7 +346,7 @@ impl ChainClient for SubtensorClient {
     }
 
     async fn get_current_block(&self) -> Result<u64> {
-        Ok(self.current_block)
+        Ok(*self.current_block.read().await)
     }
 
     fn metadata(&self) -> ChainMetadata {
@@ -271,9 +355,10 @@ impl ChainClient for SubtensorClient {
 }
 
 impl SubtensorClient {
-    /// Set current block number
-    pub fn set_block(&mut self, block: u64) {
-        self.current_block = block;
+    /// Set current block number (for testing/simulation)
+    pub async fn set_block(&self, block: u64) {
+        let mut current = self.current_block.write().await;
+        *current = block;
     }
 
     /// Get block modulus (360 blocks for sync)

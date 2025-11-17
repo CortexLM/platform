@@ -137,6 +137,19 @@ impl EpochManager {
         loop {
             check_interval.tick().await;
 
+            // Log next epoch info every 12 seconds
+            {
+                let block_sync = self.block_sync_manager.read().await;
+                let sync_info = block_sync.get_sync_info();
+                let next_sync_block = block_sync.get_next_sync_block();
+                info!(
+                    "📊 Next epoch: block {} (in {} blocks) | Current: block {}",
+                    next_sync_block,
+                    sync_info.blocks_until_sync,
+                    sync_info.current_block
+                );
+            }
+
             // Check for pending commits that need to be revealed
             if let Some(commit_service) = &self.commit_weights_service {
                 let current_block = {

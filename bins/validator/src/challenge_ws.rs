@@ -121,7 +121,10 @@ impl ChallengeWsClient {
             if let Some(msg_type) = msg.get("type").and_then(|t| t.as_str()) {
                 // Send weight request on first message (connected or after encryption setup)
                 let should_send = {
-                    let mut sent = sent_request_clone.lock().unwrap();
+                    let mut sent = sent_request_clone.lock().unwrap_or_else(|poisoned| {
+                        warn!("Mutex poisoned in weight request, recovering");
+                        poisoned.into_inner()
+                    });
                     if !*sent {
                         *sent = true;
                         true
