@@ -364,9 +364,18 @@ pub async fn get_or_prompt_env_vars(
     // Detect required vars from platform.toml
     let required_env_configs = detect_required_env_vars(challenge_name, github_repo).await?;
 
+    // Always inject CHUTES_API_TOKEN from validator environment if available
+    let mut system_env_vars = HashMap::new();
+    if let Ok(chutes_token) = std::env::var("CHUTES_API_TOKEN") {
+        if !chutes_token.is_empty() {
+            system_env_vars.insert("CHUTES_API_TOKEN".to_string(), chutes_token);
+            info!("Adding CHUTES_API_TOKEN from validator environment to challenge environment");
+        }
+    }
+
     if required_env_configs.is_empty() {
-        // No required vars, just return empty map
-        return Ok(HashMap::new());
+        // No required vars from platform.toml, but return system env vars if any
+        return Ok(system_env_vars);
     }
 
     // Extract just the names for checking
@@ -405,6 +414,12 @@ pub async fn get_or_prompt_env_vars(
         for (key, value) in prompted_vars {
             stored_vars.insert(key, value);
         }
+    }
+
+    // Merge system env vars (like CHUTES_API_TOKEN) with stored/prompted vars
+    // System env vars take precedence to ensure they're always fresh
+    for (key, value) in system_env_vars {
+        stored_vars.insert(key, value);
     }
 
     Ok(stored_vars)

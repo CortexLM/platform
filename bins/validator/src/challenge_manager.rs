@@ -1335,6 +1335,11 @@ impl ChallengeManager {
             std::env::var("PLATFORM_BASE_API")
                 .unwrap_or_else(|_| "http://platform-api:15000".to_string()),
         );
+        
+        // Add CHUTES_API_TOKEN if available (required for LLM proxy)
+        if let Ok(chutes_token) = std::env::var("CHUTES_API_TOKEN") {
+            env_vars.insert("CHUTES_API_TOKEN".to_string(), chutes_token);
+        }
 
         // Add dev mode environment variables for challenge SDK
         // These are required for the challenge SDK to use mock quotes instead of trying dstack SDK
@@ -1396,6 +1401,16 @@ impl ChallengeManager {
 
         // Create container configuration
         let container_name = format!("challenge-{}", compose_hash_clone);
+        
+        // Mount Docker socket to enable terminal-bench to create test containers
+        let mut volumes = vec![
+            crate::docker_client::VolumeMapping {
+                host_path: "/var/run/docker.sock".to_string(),
+                container_path: "/var/run/docker.sock".to_string(),
+                read_only: false,
+            }
+        ];
+        
         let container_config = ContainerConfig {
             name: container_name.clone(),
             image,
@@ -1403,6 +1418,7 @@ impl ChallengeManager {
             ports: port_mappings,
             network: self.docker_network.clone(),
             restart_policy: "unless-stopped".to_string(),
+            volumes,
         };
 
         // Create and start container

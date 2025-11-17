@@ -1,6 +1,7 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -40,6 +41,8 @@ pub struct JobInfo {
     pub miner_hotkey: String,
     pub status: String,
     pub created_at: String,
+    #[serde(default)]
+    pub payload: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +73,22 @@ impl PlatformClient {
         Ok(challenges)
     }
 
+    /// Get full challenge specifications (for validator polling)
+    /// Returns the same format as the WebSocket challenges:list message
+    pub async fn get_challenge_specs(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/challenges/specs", self.base_url);
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(&url)
+            .header("X-Validator-Hotkey", &self.validator_hotkey)
+            .send()
+            .await?;
+
+        let specs: serde_json::Value = resp.json().await?;
+        Ok(specs)
+    }
+
     /// Get pending jobs for this validator
     pub async fn get_pending_jobs(&self) -> Result<JobsResponse> {
         let url = format!("{}/api/jobs/pending", self.base_url);
@@ -87,8 +106,6 @@ impl PlatformClient {
 
     /// Claim a specific job
     pub async fn claim_job(&self, job_id: &str) -> Result<JobInfo> {
-        use serde_json::{json, Value};
-
         let url = format!("{}/api/jobs/{}/claim", self.base_url, job_id);
         let client = reqwest::Client::new();
 
@@ -112,6 +129,19 @@ impl PlatformClient {
             .get("job")
             .ok_or_else(|| anyhow::anyhow!("Missing 'job' field in claim response"))?;
 
+        let payload_value = job_metadata.get("payload").cloned();
+
+        // Extract agent_hash from payload for better error reporting
+        let agent_hash = payload_value
+            .as_ref()
+            .and_then(|p| p.get("agent_hash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                warn!("No agent_hash in job {} payload - using 'unknown' fallback", job_id);
+                "unknown".to_string()
+            });
+
         let job = JobInfo {
             id: job_metadata
                 .get("id")
@@ -123,18 +153,13 @@ impl PlatformClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            submission_id: job_metadata
-                .get("payload")
+            submission_id: payload_value
+                .as_ref()
                 .and_then(|p| p.get("session_id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or(job_id)
                 .to_string(),
-            miner_hotkey: job_metadata
-                .get("payload")
-                .and_then(|p| p.get("agent_hash"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
+            miner_hotkey: agent_hash.clone(),
             status: job_metadata
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -145,6 +170,7 @@ impl PlatformClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            payload: payload_value,
         };
 
         Ok(job)

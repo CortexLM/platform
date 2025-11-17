@@ -26,6 +26,14 @@ pub struct ContainerConfig {
     pub ports: Vec<PortMapping>,
     pub network: String,
     pub restart_policy: String,
+    pub volumes: Vec<VolumeMapping>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VolumeMapping {
+    pub host_path: String,
+    pub container_path: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +192,25 @@ impl DockerClient {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
 
+        // Build volume bindings for Docker socket and other volumes
+        let binds: Option<Vec<String>> = if !config.volumes.is_empty() {
+            Some(
+                config
+                    .volumes
+                    .iter()
+                    .map(|v| {
+                        if v.read_only {
+                            format!("{}:{}:ro", v.host_path, v.container_path)
+                        } else {
+                            format!("{}:{}", v.host_path, v.container_path)
+                        }
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
         // Build host config
         let host_config = HostConfig {
             port_bindings: Some(port_bindings),
@@ -192,6 +219,7 @@ impl DockerClient {
                 maximum_retry_count: None,
             }),
             network_mode: Some(config.network.clone()),
+            binds,
             ..Default::default()
         };
 

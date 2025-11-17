@@ -2,6 +2,7 @@ use crate::challenge_manager::ChallengeManager;
 use crate::config::ValidatorConfig;
 use anyhow::{Context, Result};
 use platform_engine_api_client::JobInfo;
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -29,11 +30,53 @@ impl DstackExecutor {
 
         // Forward job to challenge container via WebSocket
         // The challenge will execute the job and store results via ORM
-        // Extract job_name from payload or use default
-        let job_payload = serde_json::json!({
-            "session_id": job.submission_id,
-            "agent_hash": job.miner_hotkey,
-        });
+        // Ensure payload includes required fields
+        let job_payload_value = job
+            .payload
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let mut payload_map: serde_json::Map<String, Value> = match job_payload_value {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+
+        if payload_map
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            == false
+        {
+            payload_map.insert(
+                "session_id".to_string(),
+                Value::String(job.submission_id.clone()),
+            );
+        }
+
+        if payload_map
+            .get("agent_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            == false
+        {
+            // Use miner_hotkey (which should contain agent_hash from the payload)
+            // If it's "unknown", log an error as this will cause evaluation to fail
+            if job.miner_hotkey == "unknown" {
+                error!(
+                    "Job {} has no agent_hash in payload - evaluation will fail. \
+                    This likely means the job was created without the required agent_hash field.",
+                    job.id
+                );
+            }
+            payload_map.insert(
+                "agent_hash".to_string(),
+                Value::String(job.miner_hotkey.clone()),
+            );
+        }
+
+        let job_payload = Value::Object(payload_map);
 
         // Default job name for term-challenge is "evaluate_agent"
         // This can be extracted from job metadata if available

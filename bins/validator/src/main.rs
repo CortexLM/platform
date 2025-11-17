@@ -8,7 +8,7 @@ use serde_json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 mod challenge_manager;
@@ -191,6 +191,9 @@ async fn main() -> Result<()> {
     let executor_clone = executor.clone();
     let keypair_clone = Arc::new(keypair);
     let challenge_manager_clone = challenge_manager.clone();
+    
+    // Clone client for polling loop before moving it to WebSocket
+    let client_poll = client.clone();
 
     tokio::spawn(async move {
         client
@@ -267,6 +270,20 @@ async fn main() -> Result<()> {
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    // Start challenge polling loop to detect new challenges
+    let challenge_manager_poll = challenge_manager.clone();
+
+    tokio::spawn(async move {
+        loop {
+            // Poll for new challenges every 30 seconds
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            if let Err(e) = poll_for_new_challenges(client_poll.clone(), challenge_manager_poll.clone()).await {
+                error!("Error polling for new challenges: {}", e);
+            }
         }
     });
 
@@ -639,6 +656,46 @@ async fn poll_and_execute_jobs(
 async fn monitor_challenges(job_manager: Arc<RwLock<JobManager>>) -> Result<()> {
     let mut manager = job_manager.write().await;
     manager.check_challenge_updates().await?;
+    Ok(())
+}
+
+async fn poll_for_new_challenges(
+    client: PlatformClient,
+    challenge_manager: Arc<ChallengeManager>,
+) -> Result<()> {
+    // Get full challenge specifications from platform-api
+    match client.get_challenge_specs().await {
+        Ok(specs_response) => {
+            // Extract challenges array from response
+            if let Some(challenges_array) = specs_response["challenges"].as_array() {
+                // Convert to ChallengeSpec vector
+                let challenge_specs: Vec<challenge_manager::ChallengeSpec> = challenges_array
+                    .iter()
+                    .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                    .collect();
+
+                if !challenge_specs.is_empty() {
+                    info!(
+                        "Polled {} challenges from platform-api, initializing new ones",
+                        challenge_specs.len()
+                    );
+
+                    // Initialize challenges - this will only create new ones, not affect existing
+                    if let Err(e) = challenge_manager
+                        .initialize_challenges(challenge_specs)
+                        .await
+                    {
+                        error!("Failed to initialize polled challenges: {}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // Don't log errors too frequently to avoid spam
+            debug!("Failed to poll for new challenges: {}", e);
+        }
+    }
+
     Ok(())
 }
 
