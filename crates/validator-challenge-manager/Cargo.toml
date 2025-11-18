@@ -1,0 +1,37 @@
+[package]
+name = "platform-validator-challenge-manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal dependencies
+platform-engine-api-client = { workspace = true }
+platform-engine-dynamic-values = { workspace = true }
+platform-validator-core = { workspace = true }
+platform-validator-websocket = { workspace = true }
+platform-validator-docker = { workspace = true }
+platform-validator-vmm = { workspace = true }
+platform-validator-quota = { workspace = true }
+
+# Core dependencies
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+base64 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+dialoguer = "0.11"
+rpassword = "7.3"
+toml = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+

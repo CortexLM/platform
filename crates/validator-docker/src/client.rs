@@ -7,7 +7,7 @@ use bollard::container::{
 use bollard::models::{ContainerStateStatusEnum, HostConfig, PortBinding};
 use bollard::network::{CreateNetworkOptions, ListNetworksOptions};
 use bollard::Docker;
-use futures_util::StreamExt;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{error, info, warn};

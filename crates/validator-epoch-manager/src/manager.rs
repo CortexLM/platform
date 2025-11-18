@@ -1,6 +1,5 @@
-use crate::challenge_manager::ChallengeManager;
-use crate::challenge_ws::ChallengeWsClient;
-use crate::config::ValidatorConfig;
+use crate::config::EpochConfig;
+use crate::types::CachedEpochWeights;
 use anyhow::Result;
 use platform_engine_api_client::PlatformClient;
 use platform_engine_chain::{
@@ -8,59 +7,23 @@ use platform_engine_chain::{
     CommitWeightsService, HotkeyMapper, MechanismWeightAggregator, NetworkHyperparameters,
     SubtensorClient,
 };
+use platform_validator_challenge_manager::ChallengeManager;
+use platform_validator_websocket::ChallengeWsClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
-/// Cached weights for a specific epoch (sync_block)
-#[derive(Debug, Clone)]
-struct CachedEpochWeights {
-    /// The sync_block for which these weights were calculated
-    epoch_sync_block: u64,
-    /// Chain-formatted weights by mechanism ID
-    chain_weights_by_mechanism: HashMap<u8, Vec<(u64, u16)>>,
-    /// Block number where weights were calculated
-    calculated_at_block: u64,
-}
-
-/// Configuration for epoch-based weight setting
-#[derive(Debug, Clone)]
-pub struct EpochConfig {
-    pub block_interval: u64,                  // Every N blocks (default 360)
-    pub weight_query_timeout: u64,            // Timeout for weight queries in seconds
-    pub weight_submission_retries: u32,       // Number of retries for chain submission
-    pub commit_block_offset: u64,             // Block offset for commit (before sync block)
-    pub reveal_block_offset: u64,             // Block offset for reveal (after sync block)
-    pub use_commit_reveal: bool, // Activate commit-reveal instead of direct set_weights
-    pub epoch_interval_blocks: u64, // Interval in blocks to define an epoch
-    pub weight_submission_safety_margin: u64, // Blocks before epoch to submit (default: 10)
-    pub weight_submission_jitter_max: u64, // Maximum random delay (default: 10)
-    pub weight_retry_backoff_multiplier: f64, // Exponential backoff factor (default: 2.0)
-}
-
-impl Default for EpochConfig {
-    fn default() -> Self {
-        Self {
-            block_interval: 360,
-            weight_query_timeout: 30,
-            weight_submission_retries: 3,
-            commit_block_offset: 5,     // Commit 5 blocks before sync block
-            reveal_block_offset: 1,     // Reveal 1 block after sync block
-            use_commit_reveal: false,   // Default to direct set_weights for backward compatibility
-            epoch_interval_blocks: 360, // Same as block_interval by default
-            weight_submission_safety_margin: 10, // Submit 10 blocks before epoch end
-            weight_submission_jitter_max: 10, // Max 10 blocks jitter
-            weight_retry_backoff_multiplier: 2.0, // Exponential backoff multiplier
-        }
-    }
+/// Configuration trait for validator config
+pub trait ValidatorConfigTrait {
+    fn validator_hotkey(&self) -> &str;
 }
 
 /// Manages epoch-based weight collection and submission
-pub struct EpochManager {
+pub struct EpochManager<C: ValidatorConfigTrait> {
     config: EpochConfig,
-    validator_config: ValidatorConfig,
+    validator_config: Arc<C>,
     block_sync_manager: Arc<RwLock<BlockSyncManager>>,
     challenge_manager: Arc<ChallengeManager>,
     subtensor_client: Arc<SubtensorClient>,
@@ -73,10 +36,10 @@ pub struct EpochManager {
     cached_weights: Arc<RwLock<Option<CachedEpochWeights>>>,
 }
 
-impl EpochManager {
+impl<C: ValidatorConfigTrait + Send + Sync + 'static> EpochManager<C> {
     pub fn new(
         config: EpochConfig,
-        validator_config: ValidatorConfig,
+        validator_config: Arc<C>,
         block_sync_manager: Arc<RwLock<BlockSyncManager>>,
         challenge_manager: Arc<ChallengeManager>,
         subtensor_client: Arc<SubtensorClient>,
@@ -536,7 +499,7 @@ impl EpochManager {
             .iter()
             .find(|s| &s.compose_hash == compose_hash);
 
-        if let Some(status) = status {
+        if let Some(_status) = status {
             // For now, we'll need to construct the API URL from the compose hash
             // Use compose_hash to construct the challenge API URL
             let api_url = format!("http://challenge-{}", compose_hash);
@@ -550,7 +513,7 @@ impl EpochManager {
             // Create WebSocket client and request weights
             let ws_client = ChallengeWsClient::new(
                 ws_url,
-                self.validator_config.validator_hotkey.clone(),
+                self.validator_config.validator_hotkey().to_string(),
                 compose_hash.to_string(),
             );
 
@@ -781,7 +744,9 @@ impl EpochManager {
 }
 
 /// Start epoch management in a background task
-pub fn spawn_epoch_manager(epoch_manager: Arc<EpochManager>) {
+pub fn spawn_epoch_manager<C: ValidatorConfigTrait + Send + Sync + 'static>(
+    epoch_manager: Arc<EpochManager<C>>,
+) {
     tokio::spawn(async move {
         epoch_manager.start_monitoring().await;
     });

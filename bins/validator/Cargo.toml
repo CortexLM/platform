@@ -18,6 +18,14 @@ platform-engine-challenge-spec = { workspace = true }
 platform-engine-dynamic-values = { workspace = true }
 platform-engine-executor = { workspace = true }
 platform-engine-chain = { workspace = true }
+platform-validator-core = { workspace = true }
+platform-validator-challenge-manager = { workspace = true }
+platform-validator-websocket = { workspace = true }
+platform-validator-http-server = { workspace = true }
+platform-validator-docker = { workspace = true }
+platform-validator-vmm = { workspace = true }
+platform-validator-quota = { workspace = true }
+platform-validator-epoch-manager = { workspace = true }
 
 # Dstack SDK
 dstack-sdk = { workspace = true }

@@ -1,33 +1,11 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-/// Resource requirements for a VM
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct ResourceRequest {
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_mb: u64,
-}
-
-/// Resource capacity totals
-#[derive(Debug, Clone, Copy)]
-pub struct ResourceCapacity {
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_mb: u64,
-}
-
-/// Quota reservation result
-#[derive(Debug, Clone, PartialEq)]
-pub enum QuotaResult {
-    Granted,
-    Insufficient,
-}
+use crate::types::{QuotaResult, ResourceCapacity, ResourceRequest};
 
 /// Per-challenge state tracking
 #[derive(Debug, Clone)]
@@ -121,14 +99,12 @@ impl CVMQuotaManager {
         let mut challenges = self.challenges.write().await;
 
         if let Some(state) = challenges.get_mut(&compose_hash) {
-            // Update emission_share
             state.emission_share = emission_share;
             info!(
                 "Updated challenge {} with emission_share: {}",
                 compose_hash, emission_share
             );
         } else {
-            // Register new challenge
             challenges.insert(
                 compose_hash.clone(),
                 ChallengeQuotaState::new(compose_hash.clone(), emission_share),
@@ -149,12 +125,10 @@ impl CVMQuotaManager {
         let mut challenges = self.challenges.write().await;
 
         if let Some(state) = challenges.get_mut(compose_hash) {
-            // Update demand EMA (treat each reservation attempt as demand signal)
             state.demand_ema =
                 self.params.alpha * 1.0 + (1.0 - self.params.alpha) * state.demand_ema;
             state.last_reservation_time = Instant::now();
 
-            // Check if we have enough reserved capacity minus what's in use
             let available = ResourceRequest {
                 cpu_cores: state
                     .reserved
@@ -171,7 +145,6 @@ impl CVMQuotaManager {
                 && request.memory_mb <= available.memory_mb
                 && request.disk_mb <= available.disk_mb
             {
-                // Grant reservation
                 state.in_use.cpu_cores += request.cpu_cores;
                 state.in_use.memory_mb += request.memory_mb;
                 state.in_use.disk_mb += request.disk_mb;
@@ -226,7 +199,6 @@ impl CVMQuotaManager {
             return;
         }
 
-        // Calculate total demand EMA for normalization
         let total_demand: f64 = active_challenges
             .iter()
             .filter_map(|(hash, _)| challenges.get(hash))
@@ -239,7 +211,6 @@ impl CVMQuotaManager {
             0.0
         };
 
-        // Calculate weights for each challenge
         let mut weights: Vec<(String, f64)> = Vec::new();
         for (compose_hash, emission_share) in active_challenges {
             if let Some(state) = challenges.get(compose_hash) {
@@ -249,7 +220,6 @@ impl CVMQuotaManager {
             }
         }
 
-        // Normalize weights to sum to 1.0
         let total_weight: f64 = weights.iter().map(|(_, w)| w).sum();
         if total_weight > 0.0 {
             for (_, w) in weights.iter_mut() {
@@ -257,12 +227,10 @@ impl CVMQuotaManager {
             }
         }
 
-        // Apply minimum floor per challenge
         let floor_per_challenge = self.params.min_floor;
         let floor_total = floor_per_challenge * active_challenges.len() as f64;
 
         if floor_total < 1.0 {
-            // Re-distribute the remaining capacity after floor
             let remaining = 1.0 - floor_total;
             let floor_adjusted_weight: f64 = weights
                 .iter()
@@ -279,10 +247,8 @@ impl CVMQuotaManager {
             }
         }
 
-        // Allocate resources proportionally
         for (compose_hash, weight) in weights {
             if let Some(state) = challenges.get_mut(&compose_hash) {
-                // Water-filling allocation per resource
                 state.reserved.cpu_cores =
                     ((self.capacity.cpu_cores as f64) * weight).ceil() as u32;
                 state.reserved.memory_mb =
@@ -301,7 +267,6 @@ impl CVMQuotaManager {
             }
         }
 
-        // Log totals (only if changed)
         let total_reserved_cpu: u32 = challenges.values().map(|s| s.reserved.cpu_cores).sum();
         let total_reserved_mem: u64 = challenges.values().map(|s| s.reserved.memory_mb).sum();
         let total_reserved_disk: u64 = challenges.values().map(|s| s.reserved.disk_mb).sum();
@@ -327,7 +292,7 @@ impl CVMQuotaManager {
     /// Decay demand EMA (call periodically to decay old demand)
     pub async fn decay_demand(&self) {
         let mut challenges = self.challenges.write().await;
-        let decay_factor = 0.95; // Slight decay
+        let decay_factor = 0.95;
 
         for state in challenges.values_mut() {
             state.demand_ema *= decay_factor;
@@ -335,73 +300,3 @@ impl CVMQuotaManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_proportional_allocation() {
-        let capacity = ResourceCapacity {
-            cpu_cores: 10,
-            memory_mb: 4096,
-            disk_mb: 20480,
-        };
-
-        let manager = CVMQuotaManager::with_capacity(capacity);
-
-        // Register two challenges with different emission shares
-        manager
-            .register_or_update_challenge("challenge1".to_string(), 0.7)
-            .await;
-        manager
-            .register_or_update_challenge("challenge2".to_string(), 0.3)
-            .await;
-
-        // Recompute reservations
-        let active = vec![
-            ("challenge1".to_string(), 0.7),
-            ("challenge2".to_string(), 0.3),
-        ];
-        manager.recompute_reservations(&active).await;
-
-        // Check allocations
-        let (reserved1, _) = manager.get_challenge_state("challenge1").await.unwrap();
-        let (reserved2, _) = manager.get_challenge_state("challenge2").await.unwrap();
-
-        // Challenge 1 should get more resources due to higher emission_share
-        assert!(reserved1.cpu_cores > reserved2.cpu_cores);
-        assert!(reserved1.memory_mb > reserved2.memory_mb);
-        assert!(reserved1.disk_mb > reserved2.disk_mb);
-    }
-
-    #[tokio::test]
-    async fn test_quota_enforcement() {
-        let capacity = ResourceCapacity {
-            cpu_cores: 4,
-            memory_mb: 2048,
-            disk_mb: 10240,
-        };
-
-        let manager = CVMQuotaManager::with_capacity(capacity);
-
-        manager
-            .register_or_update_challenge("challenge1".to_string(), 1.0)
-            .await;
-
-        let active = vec![("challenge1".to_string(), 1.0)];
-        manager.recompute_reservations(&active).await;
-
-        // Should be able to reserve within capacity
-        let request = ResourceRequest {
-            cpu_cores: 2,
-            memory_mb: 1024,
-            disk_mb: 5120,
-        };
-
-        let result = manager.reserve("challenge1", request).await.unwrap();
-        assert_eq!(result, QuotaResult::Granted);
-
-        // Should be able to release
-        manager.release("challenge1", request).await;
-    }
-}

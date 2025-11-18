@@ -1,63 +1,10 @@
 use anyhow::Result;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
 
-// VMM types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VmConfiguration {
-    pub name: String,
-    pub image: String,
-    pub compose_file: String,
-    pub vcpu: u32,
-    pub memory: u32,
-    pub disk_size: u32,
-    pub ports: Vec<PortMapping>,
-    #[serde(default)]
-    pub encrypted_env: Vec<u8>,
-    #[serde(default)]
-    pub app_id: Option<String>,
-    #[serde(default)]
-    pub user_config: String,
-    pub hugepages: bool,
-    pub pin_numa: bool,
-    #[serde(default)]
-    pub gpus: Option<GpuConfig>,
-    #[serde(default)]
-    pub kms_urls: Vec<String>,
-    #[serde(default)]
-    pub gateway_urls: Vec<String>,
-    pub stopped: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuConfig {
-    #[serde(default)]
-    pub gpus: Vec<GpuSpec>,
-    #[serde(default)]
-    pub attach_mode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuSpec {
-    #[serde(default)]
-    pub slot: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortMapping {
-    pub protocol: String,
-    pub host_port: u32,
-    pub vm_port: u32,
-    pub host_address: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Id {
-    pub id: String,
-}
+use crate::types::*;
 
 /// VMM client for creating and managing CVMs
 pub struct VmmClient {
@@ -87,7 +34,6 @@ impl VmmClient {
     /// Create a CVM with the given configuration
     pub async fn create_vm(&self, config: VmConfiguration) -> Result<String> {
         if self.mock_mode {
-            // Mock mode: return fake VM ID without actually creating a VM
             let vm_id = format!(
                 "mock-vm-{}",
                 Uuid::new_v4().to_string().split('-').next().unwrap()
@@ -99,14 +45,12 @@ impl VmmClient {
 
         let url = format!("{}/prpc/CreateVm?json", self.vmm_url);
 
-        // Encode encrypted_env as hex string (VMM expects hex, not base64)
         let encrypted_env_str = if config.encrypted_env.is_empty() {
             "".to_string()
         } else {
             hex::encode(&config.encrypted_env)
         };
 
-        // Convert to JSON
         let mut payload = json!({
             "name": config.name,
             "image": config.image,
@@ -127,7 +71,6 @@ impl VmmClient {
             "stopped": config.stopped,
         });
 
-        // Add optional fields if they exist
         if let Some(app_id) = &config.app_id {
             payload["app_id"] = json!(app_id);
         }
@@ -144,17 +87,13 @@ impl VmmClient {
             payload["gateway_urls"] = json!(config.gateway_urls);
         }
 
-        info!(
-            "Sending CreateVm request to VMM: {}",
-            serde_json::to_string_pretty(&payload)?
-        );
+        info!("Sending CreateVm request to VMM: {}", serde_json::to_string_pretty(&payload)?);
 
         let response = self.client.post(&url).json(&payload).send().await?;
 
         let status = response.status();
         info!("VMM response status: {}", status);
 
-        // Check response status
         if !status.is_success() {
             let error_text = response
                 .text()
@@ -163,11 +102,9 @@ impl VmmClient {
             anyhow::bail!("VMM API error ({}): {}", status, error_text);
         }
 
-        // Get response body for debugging
         let response_body = response.text().await?;
         info!("VMM response body: {}", response_body);
 
-        // Try to parse as Id struct
         let vm_id: Id = serde_json::from_str(&response_body).map_err(|e| {
             anyhow::anyhow!("Failed to parse VMM response '{}': {}", response_body, e)
         })?;
@@ -180,7 +117,6 @@ impl VmmClient {
     /// Get VM info by ID
     pub async fn get_vm_info(&self, vm_id: &str) -> Result<VmInfo> {
         if self.mock_mode {
-            // Mock mode: return fake VM info
             return Ok(VmInfo {
                 id: vm_id.to_string(),
                 name: format!("mock-{}", vm_id),
@@ -297,36 +233,10 @@ impl VmmClient {
 
         Ok(())
     }
-}
 
-#[derive(Debug, serde::Deserialize)]
-pub struct GetInfoResponse {
-    pub found: bool,
-    pub info: Option<VmInfo>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct VmInfo {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub uptime: String,
-    pub app_url: Option<String>,
-    pub app_id: String,
-    pub instance_id: Option<String>,
-    pub configuration: serde_json::Value,
-    pub exited_at: Option<String>,
-    pub boot_progress: String,
-    pub boot_error: String,
-    pub shutdown_progress: String,
-    pub image_version: String,
-}
-
-/// Get VMM metadata including available resources
-impl VmmClient {
+    /// Get VMM metadata including available resources
     pub async fn get_meta(&self) -> Result<VmmMetadata> {
         if self.mock_mode {
-            // Mock mode: return fake metadata
             return Ok(VmmMetadata {
                 kms: None,
                 gateway: Some(GatewaySettings {
@@ -356,7 +266,6 @@ impl VmmClient {
     /// List all VMs
     pub async fn list_vms(&self) -> Result<Vec<VmInfo>> {
         if self.mock_mode {
-            // Mock mode: return empty list
             return Ok(vec![]);
         }
 
@@ -370,36 +279,3 @@ impl VmmClient {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct VmmMetadata {
-    pub kms: Option<KmsSettings>,
-    pub gateway: Option<GatewaySettings>,
-    pub resources: Option<ResourcesSettings>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct KmsSettings {
-    pub url: String,
-    pub urls: Vec<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct GatewaySettings {
-    pub url: String,
-    pub base_domain: String,
-    pub port: u32,
-    pub agent_port: u32,
-    pub urls: Vec<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ResourcesSettings {
-    pub max_cvm_number: u32,
-    pub max_allocable_vcpu: u32,
-    pub max_allocable_memory_in_mb: u32,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct VmmStatus {
-    pub vms: Vec<VmInfo>,
-}

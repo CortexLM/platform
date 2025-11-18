@@ -1,41 +1,29 @@
 use anyhow::{anyhow, Context, Result};
 use base64;
 use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use hex;
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
-use uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-/// Envelope used for encrypted WebSocket frames
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct EncryptedEnvelope {
-    enc: String,
-    nonce: String,      // base64(12 bytes)
-    ciphertext: String, // base64
-}
-
-/// Plaintext message payload structure after decryption
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct PlainMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-    #[serde(default)]
-    payload: serde_json::Value,
-}
+use crate::crypto::EncryptedEnvelope;
+use crate::verification::{verify_challenge_compose_hash, verify_environment_match, verify_tdx_quote, ValidatorQuoteData};
 
 /// Weight request message sent to challenges
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WeightRequest {
     #[serde(rename = "type")]
-    pub msg_type: String, // "weight_request"
+    pub msg_type: String,
     pub block: u64,
     pub timestamp: i64,
 }
@@ -44,8 +32,8 @@ pub struct WeightRequest {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WeightResponse {
     #[serde(rename = "type")]
-    pub msg_type: String, // "weight_response"
-    pub weights: std::collections::HashMap<String, f64>, // uid -> weight
+    pub msg_type: String,
+    pub weights: HashMap<String, f64>,
     pub block: u64,
 }
 
@@ -72,16 +60,14 @@ impl ChallengeWsClient {
         }
     }
 
-    /// Request weights from a challenge
     pub async fn request_weights(
         &self,
         block: u64,
         timeout_secs: u64,
-    ) -> Result<std::collections::HashMap<String, f64>> {
+    ) -> Result<HashMap<String, f64>> {
         let (tx, mut rx) = mpsc::channel(1);
         let block_clone = block;
 
-        // Connect and send weight request
         let handle = tokio::spawn({
             let url = self.url.clone();
             let validator_hotkey = self.validator_hotkey.clone();
@@ -93,36 +79,27 @@ impl ChallengeWsClient {
             }
         });
 
-        // Wait for response with timeout
         let timeout = tokio::time::Duration::from_secs(timeout_secs);
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Some(weights)) => Ok(weights),
             Ok(None) => Err(anyhow!("Channel closed without response")),
             Err(_) => {
-                // Cancel the connection task
                 handle.abort();
-                Err(anyhow!(
-                    "Weight request timed out after {} seconds",
-                    timeout_secs
-                ))
+                Err(anyhow!("Weight request timed out after {} seconds", timeout_secs))
             }
         }
     }
 
-    /// Connect once specifically for weight request
     async fn connect_once_for_weights(
         &self,
         block: u64,
-        result_tx: mpsc::Sender<std::collections::HashMap<String, f64>>,
+        result_tx: mpsc::Sender<HashMap<String, f64>>,
     ) -> Result<()> {
-        use std::sync::{Arc, Mutex};
-
         let sent_request = Arc::new(Mutex::new(false));
         let sent_request_clone = sent_request.clone();
 
         let callback = move |msg: Value, tx: mpsc::Sender<Value>| {
             if let Some(msg_type) = msg.get("type").and_then(|t| t.as_str()) {
-                // Send weight request on first message (connected or after encryption setup)
                 let should_send = {
                     let mut sent = sent_request_clone.lock().unwrap_or_else(|poisoned| {
                         warn!("Mutex poisoned in weight request, recovering");
@@ -140,12 +117,11 @@ impl ChallengeWsClient {
                     let request = serde_json::json!({
                         "type": "weight_request",
                         "block": block,
-                        "timestamp": chrono::Utc::now().timestamp(),
+                        "timestamp": Utc::now().timestamp(),
                     });
                     let _ = tx.try_send(request);
                 }
 
-                // Handle weight response
                 if msg_type == "weight_response" {
                     if let Ok(response) = serde_json::from_value::<WeightResponse>(msg.clone()) {
                         if response.block == block {
@@ -156,7 +132,6 @@ impl ChallengeWsClient {
             }
         };
 
-        // For weights, we don't need on_ready callback
         self.connect_once(
             &callback,
             None::<&fn(tokio::sync::mpsc::Sender<serde_json::Value>)>,
@@ -164,9 +139,6 @@ impl ChallengeWsClient {
         .await
     }
 
-    /// Connect with automatic reconnection and run the message loop.
-    /// The callback receives decrypted JSON messages and a sender for plaintext replies.
-    /// The on_ready callback (if provided) is called once when the sender becomes available after attestation.
     pub async fn connect_with_reconnect<F>(&self, callback: F)
     where
         F: Fn(Value, mpsc::Sender<Value>) + Send + Sync + 'static,
@@ -179,8 +151,6 @@ impl ChallengeWsClient {
         .await
     }
 
-    /// Connect with automatic reconnection, calling `on_ready` once the sender
-    /// becomes available and `on_disconnect` whenever a connection attempt ends.
     pub async fn connect_with_reconnect_and_ready<F, R, D>(
         &self,
         callback: F,
@@ -197,7 +167,6 @@ impl ChallengeWsClient {
         loop {
             match self.connect_once(&callback, on_ready.as_ref()).await {
                 Ok(_) => {
-                    // Normal close - reset backoff
                     backoff_secs = 1;
                 }
                 Err(e) => {
@@ -219,32 +188,26 @@ impl ChallengeWsClient {
         F: Fn(Value, mpsc::Sender<Value>) + Send + Sync + 'static,
         R: Fn(mpsc::Sender<Value>) + Send + Sync + 'static,
     {
-        // URL already includes /sdk/ws path
         let (ws_stream, _) = connect_async(&self.url).await?;
         let (mut write, mut read) = ws_stream.split();
 
         info!("Connected WS to {}", self.url);
 
-        // Generate validator X25519 ephemeral keypair
         let val_secret = EphemeralSecret::random_from_rng(&mut rand::thread_rng());
         let val_public = PublicKey::from(&val_secret);
 
         let val_pub_b64 = base64::encode(val_public.as_bytes());
 
-        // Validator initiates attestation handshake
-        // Generate validator nonce
         let mut validator_nonce_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut validator_nonce_bytes);
         let validator_nonce_hex = hex::encode(validator_nonce_bytes);
 
         info!("Initiating attestation handshake with validator nonce");
 
-        // Calculate report_data from validator's own nonce
         let mut hasher = Sha256::new();
         hasher.update(&validator_nonce_bytes);
         let report_data = hasher.finalize()[..32].to_vec();
 
-        // Generate validator quote with validator's nonce
         let mock_vmm =
             std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true";
 
@@ -258,19 +221,12 @@ impl ChallengeWsClient {
                     debug!("MOCK VMM MODE: Using mock quote structure");
                     self.create_mock_quote(&report_data)
                 } else {
-                    error!(
-                        "Security error: Cannot get validator TDX quote in production mode: {}",
-                        e
-                    );
-                    return Err(anyhow!(
-                        "Validator TDX quote required for mutual attestation. Error: {}",
-                        e
-                    ));
+                    error!("Security error: Cannot get validator TDX quote in production mode: {}", e);
+                    return Err(anyhow!("Validator TDX quote required for mutual attestation. Error: {}", e));
                 }
             }
         };
 
-        // Send attestation_begin with validator quote
         let begin_msg = serde_json::json!({
             "type": "attestation_begin",
             "nonce": validator_nonce_hex,
@@ -282,7 +238,6 @@ impl ChallengeWsClient {
         write.send(Message::Text(begin_msg.to_string())).await?;
         info!("Sent attestation_begin with validator quote");
 
-        // Initialize connection state
         let mut conn_state = ConnectionState::Unverified {
             nonce: validator_nonce_bytes,
             started: Instant::now(),
@@ -290,7 +245,6 @@ impl ChallengeWsClient {
         let mut chal_pub_opt: Option<[u8; 32]> = None;
         let mut aead_key: Option<[u8; 32]> = None;
 
-        // Wait for challenge's attestation_response
         while let Some(msg) = read.next().await {
             let msg = msg?;
             match msg {
@@ -299,7 +253,6 @@ impl ChallengeWsClient {
                         serde_json::from_str(&text).map_err(|e| anyhow!("invalid JSON: {}", e))?;
                     let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-                    // Handle challenge's attestation_response (challenge sends its quote after verifying ours)
                     if typ == "attestation_response" {
                         let quote_b64 =
                             v.get("quote").and_then(|q| q.as_str()).ok_or_else(|| {
@@ -313,17 +266,11 @@ impl ChallengeWsClient {
                             })?;
                         let event_log = v.get("event_log").and_then(|e| e.as_str());
 
-                        // Verify challenge TDX quote and nonce binding
-                        // Challenge uses validator's nonce to generate its quote (report_data = SHA256(validator_nonce))
-                        match self
-                            .verify_tdx_quote(quote_b64, &validator_nonce_bytes)
-                            .await
-                        {
+                        match verify_tdx_quote(quote_b64, &validator_nonce_bytes).await {
                             Ok(_) => {
                                 info!("Challenge TDX quote structure and signature verified");
                             }
                             Err(e) => {
-                                // In dev mode, be more lenient with mock quotes
                                 let mock_vmm = std::env::var("VALIDATOR_MOCK_VMM")
                                     .unwrap_or_else(|_| "false".to_string())
                                     == "true";
@@ -340,16 +287,12 @@ impl ChallengeWsClient {
                                         "reason": "Challenge TDX verification failed",
                                     });
                                     write.send(Message::Text(reject.to_string())).await?;
-                                    return Err(anyhow!(
-                                        "Challenge TDX verification failed: {}",
-                                        e
-                                    ));
+                                    return Err(anyhow!("Challenge TDX verification failed: {}", e));
                                 }
                             }
                         }
 
-                        // Verify environment mode isolation (dev/prod)
-                        if let Some(env_err) = self.verify_environment_match(event_log).await {
+                        if let Some(env_err) = verify_environment_match(event_log).await {
                             error!("Environment verification failed: {}", env_err);
                             conn_state = ConnectionState::Rejected {
                                 reason: format!("Environment mismatch: {}", env_err),
@@ -362,11 +305,7 @@ impl ChallengeWsClient {
                             return Err(anyhow!("Environment verification failed: {}", env_err));
                         }
 
-                        // Verify compose_hash
-                        if let Err(e) = self
-                            .verify_challenge_compose_hash(event_log, &self.expected_compose_hash)
-                            .await
-                        {
+                        if let Err(e) = verify_challenge_compose_hash(event_log, &self.expected_compose_hash).await {
                             error!("Challenge compose_hash verification failed: {}", e);
                             conn_state = ConnectionState::Rejected {
                                 reason: format!("Compose hash mismatch: {}", e),
@@ -379,7 +318,6 @@ impl ChallengeWsClient {
                             return Err(anyhow!("Challenge compose_hash verification failed: {}", e));
                         }
 
-                        // Decode challenge public key
                         let chal_pub = base64::decode(chal_pub_b64)?;
                         if chal_pub.len() != 32 {
                             return Err(anyhow!("invalid chal_x25519_pub length"));
@@ -390,10 +328,8 @@ impl ChallengeWsClient {
                             .map_err(|_| anyhow!("bad pubkey"))?;
                         let chal_public = PublicKey::from(chal_pub_arr);
 
-                        // Compute shared secret
                         let shared = val_secret.diffie_hellman(&chal_public);
 
-                        // Always use encryption
                         let dev_mode = std::env::var("VALIDATOR_MOCK_VMM")
                             .unwrap_or_else(|_| "false".to_string())
                             == "true";
@@ -401,26 +337,22 @@ impl ChallengeWsClient {
                             .unwrap_or_else(|_| "false".to_string())
                             == "true";
 
-                        // Log mode for debugging
                         if dev_mode || tdx_simulation_mode {
                             info!("DEV MODE: Using encrypted session with mock TDX attestation");
                         } else {
                             info!("Production mode: Using encrypted session with real TDX attestation");
                         }
 
-                        // Always send attestation_ok and derive keys
                         let mut hkdf_salt_bytes = [0u8; 32];
                         rand::thread_rng().fill_bytes(&mut hkdf_salt_bytes);
                         let hkdf_salt_b64 = base64::encode(hkdf_salt_bytes);
 
-                        // Derive AEAD key via HKDF-SHA256
                         let hk =
                             Hkdf::<sha2::Sha256>::new(Some(&hkdf_salt_bytes), shared.as_bytes());
                         let mut key = [0u8; 32];
                         hk.expand(b"platform-api-sdk-v1", &mut key)
                             .map_err(|_| anyhow!("HKDF expand failed"))?;
 
-                        // Send attestation_ok
                         let ok = serde_json::json!({
                             "type": "attestation_ok",
                             "aead": "chacha20poly1305",
@@ -428,7 +360,6 @@ impl ChallengeWsClient {
                         });
                         write.send(Message::Text(ok.to_string())).await?;
 
-                        // Update connection state to verified
                         conn_state = ConnectionState::Verified { aead_key: key };
                         chal_pub_opt = Some(chal_pub_arr);
                         aead_key = Some(key);
@@ -437,21 +368,17 @@ impl ChallengeWsClient {
                         break;
                     }
 
-                    // Handle challenge's attestation_ok (should not happen in normal flow, but handle it)
                     if typ == "attestation_ok" {
                         let challenge_pub_b64 = v
                             .get("chal_x25519_pub")
                             .and_then(|p| p.as_str())
-                            .ok_or_else(|| {
-                            anyhow!("missing chal_x25519_pub in attestation_ok")
-                        })?;
+                            .ok_or_else(|| anyhow!("missing chal_x25519_pub in attestation_ok"))?;
 
                         let hkdf_salt_b64 = v
                             .get("hkdf_salt")
                             .and_then(|s| s.as_str())
                             .ok_or_else(|| anyhow!("missing hkdf_salt in attestation_ok"))?;
 
-                        // Decode challenge public key
                         let chal_pub = base64::decode(challenge_pub_b64)?;
                         if chal_pub.len() != 32 {
                             return Err(anyhow!("invalid chal_x25519_pub length"));
@@ -462,7 +389,6 @@ impl ChallengeWsClient {
                             .map_err(|_| anyhow!("bad pubkey"))?;
                         let chal_public = PublicKey::from(chal_pub_arr);
 
-                        // Decode HKDF salt
                         let hkdf_salt_bytes = base64::decode(hkdf_salt_b64)?;
                         if hkdf_salt_bytes.len() != 32 {
                             return Err(anyhow!("invalid hkdf_salt length"));
@@ -472,16 +398,13 @@ impl ChallengeWsClient {
                             .try_into()
                             .map_err(|_| anyhow!("bad salt"))?;
 
-                        // Compute shared secret
                         let shared = val_secret.diffie_hellman(&chal_public);
 
-                        // Derive AEAD key via HKDF-SHA256
                         let hk = Hkdf::<sha2::Sha256>::new(Some(&hkdf_salt_arr), shared.as_bytes());
                         let mut key = [0u8; 32];
                         hk.expand(b"platform-api-sdk-v1", &mut key)
                             .map_err(|_| anyhow!("HKDF expand failed"))?;
 
-                        // Update connection state to verified
                         conn_state = ConnectionState::Verified { aead_key: key };
                         chal_pub_opt = Some(chal_pub_arr);
                         aead_key = Some(key);
@@ -490,7 +413,6 @@ impl ChallengeWsClient {
                         break;
                     }
 
-                    // Handle challenge's attestation_reject
                     if typ == "attestation_reject" {
                         let reason = v
                             .get("reason")
@@ -503,19 +425,11 @@ impl ChallengeWsClient {
                         return Err(anyhow!("Attestation rejected by challenge: {}", reason));
                     }
 
-                    // Check if connection is still in unverified state
                     match &conn_state {
                         ConnectionState::Unverified { .. } => {
-                            // Reject any other message before TDX verification
-                            error!(
-                                "Received unexpected message type before verification: {}",
-                                typ
-                            );
+                            error!("Received unexpected message type before verification: {}", typ);
                             conn_state = ConnectionState::Rejected {
-                                reason: format!(
-                                    "Unexpected message type before verification: {}",
-                                    typ
-                                ),
+                                reason: format!("Unexpected message type before verification: {}", typ),
                             };
                             let reject = serde_json::json!({
                                 "type": "error",
@@ -542,7 +456,6 @@ impl ChallengeWsClient {
             }
         }
 
-        // Verify we're in verified state before proceeding
         let final_aead_key = match conn_state {
             ConnectionState::Verified { aead_key } => aead_key,
             ConnectionState::Rejected { reason } => {
@@ -556,22 +469,18 @@ impl ChallengeWsClient {
         let aead_key = aead_key.ok_or_else(|| anyhow!("handshake did not establish AEAD key"))?;
         let key_for_send = aead_key;
 
-        // Sender for plaintext JSON that will be encrypted and sent
         let (tx, mut rx) = mpsc::channel::<Value>(100);
 
-        // Call on_ready callback if provided (sender is now available after attestation)
         if let Some(ready_cb) = on_ready {
             ready_cb(tx.clone());
             info!("WebSocket sender ready callback called (connection established and attested)");
         }
 
-        // Spawn task to send encrypted messages; move write into the task
         let mut write_sink = write;
         tokio::spawn(async move {
             while let Some(plain) = rx.recv().await {
                 match serde_json::to_vec(&plain) {
                     Ok(plaintext) => {
-                        // 12-byte nonce for ChaCha20-Poly1305
                         let mut nonce = [0u8; 12];
                         rand::thread_rng().fill_bytes(&mut nonce);
                         let nonce_bytes = nonce;
@@ -623,7 +532,6 @@ impl ChallengeWsClient {
             }
         });
 
-        // Read encrypted frames and deliver plaintext callback
         let tx_for_cb = tx.clone();
         while let Some(msg) = read.next().await {
             match msg {
@@ -647,7 +555,7 @@ impl ChallengeWsClient {
                             Ok(c) => c,
                             Err(_) => continue,
                         };
-                        let cipher = ChaCha20Poly1305::new(&aead_key.into());
+                        let cipher = ChaCha20Poly1305::new(&final_aead_key.into());
                         match cipher.decrypt(&nonce_arr.into(), ct.as_ref()) {
                             Ok(pt) => match serde_json::from_slice::<Value>(&pt) {
                                 Ok(json) => {
@@ -677,179 +585,9 @@ impl ChallengeWsClient {
         Ok(())
     }
 
-    async fn verify_tdx_quote(&self, quote_b64: &str, nonce_bytes: &[u8; 32]) -> Result<()> {
-        // Verify TDX quote using dcap-qvl
-        let quote_bytes = base64::decode(quote_b64)?;
-
-        info!("Verifying TDX quote with dcap-qvl: {} bytes", quote_bytes.len());
-
-        // Get PCCS URL from environment or use default
-        let pccs_url = std::env::var("PCCS_URL")
-            .unwrap_or_else(|_| "https://pccs.bittensor.com/sgx/certification/v4/".to_string());
-        
-        // Get collateral from PCCS or Intel PCS
-        let collateral = match dcap_qvl::collateral::get_collateral(&pccs_url, &quote_bytes).await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to get collateral from PCCS, trying Intel PCS: {}", e);
-                // Fallback to Intel PCS
-                dcap_qvl::collateral::get_collateral_from_pcs(&quote_bytes)
-                    .await
-                    .context("Failed to get collateral from Intel PCS")?
-            }
-        };
-
-        // Verify the quote
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-            
-        let verified_report = dcap_qvl::verify::verify(&quote_bytes, &collateral, now)
-            .context("Failed to verify TDX quote")?;
-
-        info!("TDX quote verified successfully - TCB Status: {}", verified_report.status);
-
-        // Only accept quotes with valid TCB status
-        let valid_statuses = ["UpToDate", "SWHardeningNeeded", "ConfigurationNeeded"];
-        if !valid_statuses.contains(&verified_report.status.as_str()) {
-            return Err(anyhow!(
-                "Invalid TCB status: {}. Quote may be out of date or from unrecognized hardware.",
-                verified_report.status
-            ));
-        }
-
-        // Verify nonce binding
-        let quote_struct = dcap_qvl::quote::Quote::parse(&quote_bytes)
-            .map_err(|e| anyhow!("Failed to parse quote: {:?}", e))?;
-            
-        // Get report data based on report type
-        let report_data = match &quote_struct.report {
-            dcap_qvl::quote::Report::SgxEnclave(enclave_report) => &enclave_report.report_data,
-            dcap_qvl::quote::Report::TD10(td_report) => &td_report.report_data,
-            dcap_qvl::quote::Report::TD15(td_report) => &td_report.base.report_data,
-        };
-
-        // Verify report_data matches SHA256(nonce)
-        let mut hasher = Sha256::new();
-        hasher.update(nonce_bytes);
-        let expected = hasher.finalize();
-        
-        if &report_data[..32] != expected.as_slice() {
-            return Err(anyhow!(
-                "Nonce binding verification failed: report_data does not match SHA256(nonce)"
-            ));
-                }
-
-        info!("✅ TDX quote fully verified with dcap-qvl");
-        Ok(())
-    }
-
-    /// Verify environment mode match between validator and challenge
-    async fn verify_environment_match(&self, challenge_event_log: Option<&str>) -> Option<String> {
-        // Get validator environment mode
-        let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
-            // Auto-detect from VALIDATOR_MOCK_VMM
-            if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true"
-            {
-                "dev".to_string()
-            } else {
-                "prod".to_string()
-            }
-        });
-
-        // Extract challenge environment mode from event_log
-        if let Some(event_log_str) = challenge_event_log {
-            if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(event_log_str) {
-                if let Some(challenge_env_mode) = event_log_json
-                    .get("environment_mode")
-                    .and_then(|v| v.as_str())
-                {
-                    // Verify environment match (dev cannot connect to prod and vice versa)
-                    if challenge_env_mode != validator_env_mode {
-                        return Some(format!(
-                            "Challenge environment is '{}' but validator environment is '{}'. Dev and prod environments cannot communicate.",
-                            challenge_env_mode, validator_env_mode
-                        ));
-                    }
-                } else if let Some(dev_mode) =
-                    event_log_json.get("dev_mode").and_then(|v| v.as_bool())
-                {
-                    // Fallback: check dev_mode flag
-                    let challenge_env = if dev_mode { "dev" } else { "prod" };
-                    if challenge_env != validator_env_mode {
-                        return Some(format!(
-                            "Challenge environment is '{}' (from dev_mode flag) but validator environment is '{}'. Dev and prod environments cannot communicate.",
-                            challenge_env, validator_env_mode
-                        ));
-                    }
-                }
-            }
-        }
-
-        None // Environment match verified or could not determine (non-blocking)
-    }
-
-    /// Extract compose_hash from challenge event log
-    fn extract_challenge_compose_hash(&self, event_log: Option<&str>) -> Result<String> {
-        let event_log_str = event_log
-            .ok_or_else(|| anyhow::anyhow!("Missing event log - cannot extract compose_hash"))?;
-
-        // Parse event log JSON
-        let event_log_json: serde_json::Value = serde_json::from_str(event_log_str)
-            .context("Failed to parse event log")?;
-
-        // Look for event with type "compose-hash"
-        event_log_json
-            .as_array()
-            .and_then(|events| {
-                for event in events {
-                    if let Some(event_type) = event.get("event").and_then(|e| e.as_str()) {
-                        if event_type == "compose-hash" {
-                            if let Some(payload) = event.get("event_payload").and_then(|p| p.as_str()) {
-                                return Some(payload.to_string());
-                            }
-                        }
-                    }
-                }
-                None
-            })
-            .ok_or_else(|| anyhow::anyhow!("Missing compose-hash in event log"))
-    }
-
-    /// Verify challenge compose_hash matches expected value
-    async fn verify_challenge_compose_hash(
-        &self,
-        event_log: Option<&str>,
-        expected_compose_hash: &str,
-    ) -> Result<()> {
-        // Extract compose_hash from event_log
-        let challenge_compose_hash = self.extract_challenge_compose_hash(event_log)?;
-
-        info!(
-            "Compose hash comparison - Challenge: {}, Expected: {}",
-            challenge_compose_hash, expected_compose_hash
-        );
-
-        // Compare with expected compose_hash
-        if challenge_compose_hash != expected_compose_hash {
-            return Err(anyhow::anyhow!(
-                "Compose hash mismatch: challenge reports {} but expected {}. \
-                 The challenge is not running the expected docker-compose configuration.",
-                challenge_compose_hash,
-                expected_compose_hash
-            ));
-        }
-
-        info!("✅ Challenge compose_hash verified");
-        Ok(())
-    }
-
-    /// Get validator TDX quote from dstack (if running in TDX CVM)
-    /// Uses official dstack SDK client (dstack_sdk::dstack_client::DstackClient)
     async fn get_validator_quote(&self, report_data: &[u8]) -> Result<ValidatorQuoteData> {
         use dstack_sdk::dstack_client::DstackClient;
 
-        // Create client with default endpoint (/var/run/dstack.sock) or from DSTACK_SIMULATOR_ENDPOINT env var
         let dstack_client = DstackClient::new(None);
 
         let quote_response = dstack_client
@@ -857,7 +595,6 @@ impl ChallengeWsClient {
             .await
             .context("Failed to get validator TDX quote from dstack")?;
 
-        // Get environment mode and add to event_log for isolation
         let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
             if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true"
             {
@@ -867,7 +604,6 @@ impl ChallengeWsClient {
             }
         });
 
-        // Convert RTMRs from BTreeMap to Vec<String> (before using event_log)
         let rtmrs = quote_response
             .replay_rtmrs()
             .map(|rtmrs_map| {
@@ -890,7 +626,6 @@ impl ChallengeWsClient {
                 ]
             });
 
-        // Add environment_mode to event_log
         let mut event_log = quote_response.event_log.clone();
         if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(&event_log) {
             let mut event_log_dict = event_log_json.as_object().cloned().unwrap_or_default();
@@ -901,7 +636,6 @@ impl ChallengeWsClient {
             event_log =
                 serde_json::to_string(&event_log_dict).unwrap_or_else(|_| event_log.clone());
         } else {
-            // If event_log is not JSON, create new JSON with environment_mode
             let original_event_log = event_log.clone();
             event_log = serde_json::json!({
                 "environment_mode": validator_env_mode,
@@ -910,7 +644,6 @@ impl ChallengeWsClient {
             .to_string();
         }
 
-        // Use the official decode_quote() method and encode to base64
         let quote_bytes = quote_response
             .decode_quote()
             .context("Failed to decode quote from hex")?;
@@ -923,14 +656,7 @@ impl ChallengeWsClient {
         })
     }
 
-    /// Create a mock quote structure for dev/mock mode
-    /// The structure is valid but not cryptographically verified
-    /// Enhanced to generate realistic event logs with compose_hash, app_id, instance_id
     fn create_mock_quote(&self, report_data: &[u8]) -> ValidatorQuoteData {
-        use rand::RngCore;
-        use sha2::{Digest, Sha256, Sha384};
-
-        // Get environment mode for isolation
         let validator_env_mode = std::env::var("ENVIRONMENT_MODE").unwrap_or_else(|_| {
             if std::env::var("VALIDATOR_MOCK_VMM").unwrap_or_else(|_| "false".to_string()) == "true"
             {
@@ -940,27 +666,21 @@ impl ChallengeWsClient {
             }
         });
 
-        // Try to get compose_hash from environment or use default
         let compose_hash = std::env::var("COMPOSE_HASH").unwrap_or_else(|_| {
-            // Generate a deterministic hash based on validator hotkey
             let mut hasher = Sha256::new();
             hasher.update(self.validator_hotkey.as_bytes());
             format!("dev-{}", hex::encode(&hasher.finalize()[..16]))
         });
 
-        // Generate app_id and instance_id
         let app_id = format!("validator-{}", &self.validator_hotkey[..16]);
         let instance_id = format!(
             "instance-{}",
             uuid::Uuid::new_v4().to_string()[..8].to_string()
         );
 
-        // Create a mock quote with correct size (1024 bytes minimum for TDX quotes)
         let mut mock_quote = vec![0u8; 1024];
         rand::thread_rng().fill_bytes(&mut mock_quote);
 
-        // Embed report_data at known offsets (must match challenge SDK offsets: [568, 576, 584])
-        // The challenge SDK checks these offsets, so we embed at all of them to ensure compatibility
         let report_offsets: [usize; 3] = [568, 576, 584];
         for offset in &report_offsets {
             if mock_quote.len() >= *offset + 32 {
@@ -968,7 +688,6 @@ impl ChallengeWsClient {
             }
         }
 
-        // Generate realistic RTMRs using SHA384
         let generate_rtmr = |content: &[&[u8]]| -> String {
             const INIT_MR: &str = "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
             if content.is_empty() {
@@ -988,10 +707,8 @@ impl ChallengeWsClient {
             hex::encode(mr)
         };
 
-        // Build event log events array
         let mut events = Vec::new();
 
-        // Add app-id event
         let app_id_event = serde_json::json!({
             "imr": 3,
             "event_type": 1,
@@ -1000,7 +717,6 @@ impl ChallengeWsClient {
         });
         events.push(app_id_event);
 
-        // Add instance-id event
         let instance_id_event = serde_json::json!({
             "imr": 3,
             "event_type": 2,
@@ -1009,7 +725,6 @@ impl ChallengeWsClient {
         });
         events.push(instance_id_event);
 
-        // Add compose-hash event
         let compose_hash_event = serde_json::json!({
             "imr": 3,
             "event_type": 3,
@@ -1018,7 +733,6 @@ impl ChallengeWsClient {
         });
         events.push(compose_hash_event);
 
-        // Add dev-mode marker
         let dev_mode_event = serde_json::json!({
             "imr": 3,
             "event_type": 4,
@@ -1027,7 +741,6 @@ impl ChallengeWsClient {
         });
         events.push(dev_mode_event);
 
-        // Calculate digests for events
         for event in &mut events {
             if let Some(event_type) = event.get("event_type").and_then(|e| e.as_u64()) {
                 if let Some(event_name) = event.get("event").and_then(|e| e.as_str()) {
@@ -1045,12 +758,10 @@ impl ChallengeWsClient {
             }
         }
 
-        // Generate RTMRs
         let rt_mr0 = generate_rtmr(&[]);
         let rt_mr1 = generate_rtmr(&[b"kernel"]);
         let rt_mr2 = generate_rtmr(&[b"initrd"]);
 
-        // RTMR3 from event log events
         let rt_mr3_content: Vec<&[u8]> = events
             .iter()
             .filter_map(|e| {
@@ -1064,10 +775,9 @@ impl ChallengeWsClient {
         ValidatorQuoteData {
             quote_b64: base64::encode(mock_quote),
             event_log: serde_json::to_string(&events).unwrap_or_else(|_| {
-                // Fallback to simple JSON if serialization fails
                 serde_json::json!({
-                "dev_mode": true,
-                "environment_mode": validator_env_mode,
+                    "dev_mode": true,
+                    "environment_mode": validator_env_mode,
                     "app_id": app_id,
                     "instance_id": instance_id,
                     "compose_hash": compose_hash,
@@ -1110,11 +820,4 @@ mod tests {
 
         assert_eq!(decoded, plaintext);
     }
-}
-/// Validator quote data for mutual attestation
-#[derive(Debug, Clone)]
-struct ValidatorQuoteData {
-    quote_b64: String,
-    event_log: String,
-    rtmrs: Vec<String>,
 }

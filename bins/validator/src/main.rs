@@ -11,27 +11,26 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-mod challenge_manager;
-mod challenge_ws;
 mod config;
-mod cvm_quota;
-mod docker_client;
 mod dstack_provisioner;
-mod env_prompt;
-mod epoch_manager;
 mod executor;
 mod hotkey;
-mod http_server;
 mod job_manager;
 mod job_vm_manager;
 mod network_proxy;
 mod platform_verifier;
 mod secure_message;
-mod vmm_client;
 
-use challenge_manager::ChallengeManager;
+// Use extracted crates instead of local modules
+use platform_validator_challenge_manager::ChallengeManager;
+use platform_validator_quota::{CVMQuotaManager, ResourceCapacity};
+use platform_validator_docker::DockerClient;
+use platform_validator_vmm::VmmClient;
+use platform_validator_epoch_manager::{EpochConfig, EpochManager, ValidatorConfigTrait, spawn_epoch_manager};
+use platform_validator_http_server::start_http_server;
+use platform_validator_core::ChallengeSpec;
+
 use config::ValidatorConfig;
-use cvm_quota::CVMQuotaManager;
 use executor::DstackExecutor;
 use hotkey::get_keypair_from_mnemonic;
 use job_manager::JobManager;
@@ -80,7 +79,7 @@ async fn main() -> Result<()> {
     // Executor will be initialized after challenge_manager is created
 
     // Initialize CVM quota manager with capacity from config
-    let capacity = crate::cvm_quota::ResourceCapacity {
+    let capacity = ResourceCapacity {
         cpu_cores: config.resource_limits.cpu_cores,
         memory_mb: config.resource_limits.memory_mb,
         disk_mb: config.resource_limits.disk_mb,
@@ -104,7 +103,7 @@ async fn main() -> Result<()> {
             "Initializing Docker client for dev mode (socket: {:?}, network: {})",
             config.docker_socket_path, config.docker_network
         );
-        match crate::docker_client::DockerClient::new(
+        match DockerClient::new(
             config.docker_socket_path.clone(),
             config.docker_network.clone(),
         )
@@ -145,7 +144,7 @@ async fn main() -> Result<()> {
     )?));
 
     // Initialize chain components for epoch-based weight setting
-    let epoch_config = epoch_manager::EpochConfig::default();
+    let epoch_config = EpochConfig::default();
     info!(
         "Epoch manager configured with {} block intervals",
         epoch_config.block_interval
@@ -171,10 +170,24 @@ async fn main() -> Result<()> {
         .unwrap_or(1);
 
     // Initialize EpochManager
-    let validator_config_for_epoch = config.clone();
-    let epoch_manager = Arc::new(epoch_manager::EpochManager::new(
+    // Create a wrapper to implement ValidatorConfigTrait
+    struct ConfigWrapper {
+        config: ValidatorConfig,
+    }
+    
+    impl ValidatorConfigTrait for ConfigWrapper {
+        fn validator_hotkey(&self) -> &str {
+            &self.config.validator_hotkey
+        }
+    }
+    
+    let validator_config_wrapper = Arc::new(ConfigWrapper {
+        config: config.clone(),
+    });
+    
+    let epoch_manager = Arc::new(EpochManager::new(
         epoch_config,
-        validator_config_for_epoch,
+        validator_config_wrapper,
         block_sync_manager.clone(),
         challenge_manager.clone(),
         subtensor_client.clone(),
@@ -208,7 +221,7 @@ async fn main() -> Result<()> {
     info!("✅ Block sync task started - syncing with blockchain every 12s");
 
     // Start epoch manager monitoring loop
-    epoch_manager::spawn_epoch_manager(epoch_manager);
+    spawn_epoch_manager(epoch_manager);
     info!("✅ Epoch manager started and monitoring for weight submission");
 
     // Start background task to recompute quota reservations every 5s
@@ -239,7 +252,7 @@ async fn main() -> Result<()> {
 
     // Initialize job VM manager
     let job_vm_manager = Arc::new(job_vm_manager::JobVmManager::new(
-        crate::vmm_client::VmmClient::new(vmm_url.clone()),
+        VmmClient::new(vmm_url.clone()),
         cvm_quota_manager.clone(),
     ));
 
@@ -410,12 +423,12 @@ async fn main() -> Result<()> {
     let challenge_manager_http = challenge_manager.clone();
     let job_vm_clone = job_vm_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = http_server::start_http_server(
+        if let Err(e) = start_http_server(
             dynamic_values_clone,
-            Some(network_proxy_clone),
+            Some(network_proxy_clone as Arc<dyn platform_validator_http_server::NetworkProxyTrait + Send + Sync>),
             cvm_quota_clone,
             challenge_manager_http,
-            job_vm_clone,
+            job_vm_clone as Arc<dyn platform_validator_http_server::JobVmManagerTrait + Send + Sync>,
         )
         .await
         {
@@ -470,7 +483,7 @@ async fn handle_websocket_message(
         "challenges:list" => {
             info!("Received challenge list from Platform API");
             if let Some(challenges_array) = msg_json["challenges"].as_array() {
-                let challenge_specs: Vec<challenge_manager::ChallengeSpec> = challenges_array
+                let challenge_specs: Vec<ChallengeSpec> = challenges_array
                     .iter()
                     .filter_map(|c| serde_json::from_value(c.clone()).ok())
                     .collect();
@@ -769,7 +782,7 @@ async fn poll_for_new_challenges(
             // Extract challenges array from response
             if let Some(challenges_array) = specs_response["challenges"].as_array() {
                 // Convert to ChallengeSpec vector
-                let challenge_specs: Vec<challenge_manager::ChallengeSpec> = challenges_array
+                let challenge_specs: Vec<ChallengeSpec> = challenges_array
                     .iter()
                     .filter_map(|c| serde_json::from_value(c.clone()).ok())
                     .collect();

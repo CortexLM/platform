@@ -1,0 +1,17 @@
+[package]
+name = "platform-validator-epoch-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+platform-engine-api-client = { workspace = true }
+platform-engine-chain = { workspace = true }
+platform-validator-core = { workspace = true }
+platform-validator-challenge-manager = { workspace = true }
+platform-validator-websocket = { workspace = true }
+

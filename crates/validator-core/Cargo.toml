@@ -1,0 +1,19 @@
+[package]
+name = "platform-validator-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Internal dependencies
+platform-engine-challenge-spec = { workspace = true }
+

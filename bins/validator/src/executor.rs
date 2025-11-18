@@ -1,4 +1,4 @@
-use crate::challenge_manager::ChallengeManager;
+use platform_validator_challenge_manager::ChallengeManager;
 use crate::config::ValidatorConfig;
 use anyhow::Result;
 use platform_engine_api_client::JobInfo;

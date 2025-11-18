@@ -1,5 +1,5 @@
-use crate::cvm_quota::CVMQuotaManager;
-use crate::vmm_client::VmmClient;
+use platform_validator_quota::{CVMQuotaManager, ResourceRequest};
+use platform_validator_vmm::VmmClient;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use async_trait::async_trait;
 
 /// Manages VMs created for individual jobs
 pub struct JobVmManager {
@@ -81,7 +82,8 @@ impl JobVmManager {
             .map_err(|e| anyhow::anyhow!("Failed to serialize AppCompose JSON: {}", e))?;
 
         // Create VMM configuration
-        let vm_config = crate::vmm_client::VmConfiguration {
+        use platform_validator_vmm::VmConfiguration;
+        let vm_config = VmConfiguration {
             name: vm_name.clone(),
             image: "dstack-dev-0.5.3".to_string(),
             compose_file: app_compose_str,
@@ -170,7 +172,6 @@ impl JobVmManager {
             }
 
             // Release quota
-            use crate::cvm_quota::ResourceRequest;
             let _ = self
                 .quota_manager
                 .release(
@@ -212,7 +213,6 @@ impl JobVmManager {
             }
 
             // Release quota
-            use crate::cvm_quota::ResourceRequest;
             let _ = self
                 .quota_manager
                 .release(
@@ -296,7 +296,6 @@ impl JobVmManager {
 
             // Release quota if VM was tracked
             if vcpu > 0 {
-                use crate::cvm_quota::ResourceRequest;
                 let _ = self
                     .quota_manager
                     .release(
@@ -320,6 +319,14 @@ impl JobVmManager {
         }
 
         Ok(cleanup_count)
+    }
+}
+
+// Implement JobVmManagerTrait for integration with validator-http-server
+#[async_trait::async_trait]
+impl platform_validator_http_server::JobVmManagerTrait for JobVmManager {
+    async fn cleanup_challenge(&self, challenge_name: &str) -> anyhow::Result<usize> {
+        self.cleanup_challenge(challenge_name).await
     }
 }
 

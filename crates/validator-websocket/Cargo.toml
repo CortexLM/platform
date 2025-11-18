@@ -1,0 +1,30 @@
+[package]
+name = "platform-validator-websocket"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+base64 = { workspace = true }
+hex = { workspace = true }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+sha2 = { workspace = true }
+x25519-dalek = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git", features = ["default", "report"] }
+dstack-sdk = { workspace = true }
+

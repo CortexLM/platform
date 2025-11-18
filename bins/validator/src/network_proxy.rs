@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{error, info};
+use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct NetworkPolicy {
@@ -236,6 +237,14 @@ pub fn create_network_proxy_router(proxy: Arc<NetworkProxy>) -> Router {
     Router::new()
         .route("/proxy", post(proxy_http_request))
         .with_state(proxy)
+}
+
+// Implement NetworkProxyTrait for integration with validator-http-server
+#[async_trait::async_trait]
+impl platform_validator_http_server::NetworkProxyTrait for NetworkProxy {
+    fn create_router(&self) -> axum::Router {
+        create_network_proxy_router(Arc::new(self.clone()))
+    }
 }
 
 pub fn create_network_policy(config: &serde_json::Value) -> NetworkPolicy {

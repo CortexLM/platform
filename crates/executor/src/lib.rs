@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub mod dstack_executor;
+pub mod dstack;
 pub mod guest_agent_client;
 pub mod standard_executor;
 pub mod trusted_executor;
 pub mod vmm_client;
 
-pub use dstack_executor::*;
+pub use dstack::*;
 pub use guest_agent_client::*;
 pub use standard_executor::*;
 pub use trusted_executor::*;

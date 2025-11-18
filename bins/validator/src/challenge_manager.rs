@@ -1,8 +1,8 @@
-use crate::challenge_ws::ChallengeWsClient;
-use crate::cvm_quota::CVMQuotaManager;
-use crate::docker_client::{ContainerConfig, DockerClient, PortMapping as DockerPortMapping};
-use crate::env_prompt::get_or_prompt_env_vars;
-use crate::vmm_client::{VmConfiguration, VmmClient};
+use platform_validator_websocket::ChallengeWsClient;
+use platform_validator_quota::{CVMQuotaManager, ResourceRequest, QuotaResult};
+use platform_validator_docker::{ContainerConfig, DockerClient, PortMapping as DockerPortMapping, VolumeMapping};
+use platform_validator_challenge_manager::get_or_prompt_env_vars;
+use platform_validator_vmm::{VmConfiguration, VmmClient};
 use anyhow::{Context, Result};
 use base64;
 use chrono::{DateTime, Utc};
@@ -1035,7 +1035,7 @@ impl ChallengeManager {
                 * 1024;
 
             // Create resource request
-            use crate::cvm_quota::ResourceRequest;
+            use platform_validator_quota::ResourceRequest;
             let resource_request = ResourceRequest {
                 cpu_cores: spec.resources.vcpu,
                 memory_mb: memory_mb as u64,
@@ -1048,10 +1048,10 @@ impl ChallengeManager {
                 .reserve(&compose_hash_clone, resource_request)
                 .await
             {
-                Ok(crate::cvm_quota::QuotaResult::Granted) => {
+                Ok(QuotaResult::Granted) => {
                     info!("Quota granted for challenge {}", compose_hash_clone);
                 }
-                Ok(crate::cvm_quota::QuotaResult::Insufficient) => {
+                Ok(QuotaResult::Insufficient) => {
                     warn!(
                         "Insufficient quota for challenge {}, backing off",
                         compose_hash_clone
@@ -1257,7 +1257,7 @@ impl ChallengeManager {
                         instance.state = ChallengeState::Failed;
                         // Release quota on failure
                         drop(challenges);
-                        use crate::cvm_quota::ResourceRequest;
+                        use platform_validator_quota::ResourceRequest;
                         let _ = self
                             .quota_manager
                             .release(
@@ -1420,7 +1420,7 @@ impl ChallengeManager {
         let container_name = format!("challenge-{}", compose_hash_clone);
 
         // Mount Docker socket to enable terminal-bench to create test containers
-        let volumes = vec![crate::docker_client::VolumeMapping {
+        let volumes = vec![VolumeMapping {
             host_path: "/var/run/docker.sock".to_string(),
             container_path: "/var/run/docker.sock".to_string(),
             read_only: false,
@@ -1882,7 +1882,7 @@ impl ChallengeManager {
 
         // Release quota
         if resources.0 > 0 {
-            use crate::cvm_quota::ResourceRequest;
+            use platform_validator_quota::ResourceRequest;
             let _ = self
                 .quota_manager
                 .release(

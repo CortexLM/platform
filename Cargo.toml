@@ -5,6 +5,15 @@ members = [
     "crates/challenge_spec",
     "crates/dynamic_values",
     "crates/executor",
+    "crates/validator-core",
+    "crates/validator-challenge-manager",
+    "crates/validator-http-server",
+    "crates/validator-websocket",
+    "crates/validator-docker",
+    "crates/validator-epoch-manager",
+    "crates/validator-vmm",
+    "crates/validator-quota",
+    "crates/cli-commands",
     "bins/validator",
     "bins/cli",
 ]
@@ -25,6 +34,15 @@ platform-engine-chain = { path = "crates/chain" }
 platform-engine-challenge-spec = { path = "crates/challenge_spec" }
 platform-engine-dynamic-values = { path = "crates/dynamic_values" }
 platform-engine-executor = { path = "crates/executor" }
+platform-validator-core = { path = "crates/validator-core" }
+platform-validator-challenge-manager = { path = "crates/validator-challenge-manager" }
+platform-validator-http-server = { path = "crates/validator-http-server" }
+platform-validator-websocket = { path = "crates/validator-websocket" }
+platform-validator-docker = { path = "crates/validator-docker" }
+platform-validator-epoch-manager = { path = "crates/validator-epoch-manager" }
+platform-validator-vmm = { path = "crates/validator-vmm" }
+platform-validator-quota = { path = "crates/validator-quota" }
+platform-cli-commands = { path = "crates/cli-commands" }
 
 # Core dependencies
 anyhow = "1.0"
@@ -118,3 +136,7 @@ dstack-sdk-types = { git = "https://github.com/Dstack-TEE/dstack", package = "ds
 panic = "abort"
 lto = true
 codegen-units = 1
+
+# Optimize build for incremental compilation
+[profile.dev]
+incremental = true
