@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bollard::container::{
-    Config, CreateContainerOptions, InspectContainerOptions, KillContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions,
     ListContainersOptions, LogOutput, RemoveContainerOptions, StartContainerOptions,
     StopContainerOptions,
 };

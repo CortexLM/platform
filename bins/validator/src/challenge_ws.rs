@@ -6,7 +6,7 @@ use hex;
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde_json::Value;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -60,13 +60,15 @@ enum ConnectionState {
 pub struct ChallengeWsClient {
     pub url: String,
     pub validator_hotkey: String,
+    pub expected_compose_hash: String,
 }
 
 impl ChallengeWsClient {
-    pub fn new(url: String, validator_hotkey: String) -> Self {
+    pub fn new(url: String, validator_hotkey: String, expected_compose_hash: String) -> Self {
         Self {
             url,
             validator_hotkey,
+            expected_compose_hash,
         }
     }
 
@@ -83,8 +85,9 @@ impl ChallengeWsClient {
         let handle = tokio::spawn({
             let url = self.url.clone();
             let validator_hotkey = self.validator_hotkey.clone();
+            let expected_compose_hash = self.expected_compose_hash.clone();
             async move {
-                let client = ChallengeWsClient::new(url, validator_hotkey);
+                let client = ChallengeWsClient::new(url, validator_hotkey, expected_compose_hash);
                 let result = client.connect_once_for_weights(block_clone, tx).await;
                 result
             }
@@ -357,6 +360,23 @@ impl ChallengeWsClient {
                             });
                             write.send(Message::Text(reject.to_string())).await?;
                             return Err(anyhow!("Environment verification failed: {}", env_err));
+                        }
+
+                        // Verify compose_hash
+                        if let Err(e) = self
+                            .verify_challenge_compose_hash(event_log, &self.expected_compose_hash)
+                            .await
+                        {
+                            error!("Challenge compose_hash verification failed: {}", e);
+                            conn_state = ConnectionState::Rejected {
+                                reason: format!("Compose hash mismatch: {}", e),
+                            };
+                            let reject = serde_json::json!({
+                                "type": "attestation_reject",
+                                "reason": format!("Compose hash mismatch: {}", e),
+                            });
+                            write.send(Message::Text(reject.to_string())).await?;
+                            return Err(anyhow!("Challenge compose_hash verification failed: {}", e));
                         }
 
                         // Decode challenge public key
@@ -658,45 +678,69 @@ impl ChallengeWsClient {
     }
 
     async fn verify_tdx_quote(&self, quote_b64: &str, nonce_bytes: &[u8; 32]) -> Result<()> {
-        use dcap_qvl::{collateral, verify::verify};
-
+        // Verify TDX quote using dcap-qvl
         let quote_bytes = base64::decode(quote_b64)?;
-        let collateral_data = collateral::get_collateral_from_pcs(&quote_bytes).await?;
+
+        info!("Verifying TDX quote with dcap-qvl: {} bytes", quote_bytes.len());
+
+        // Get PCCS URL from environment or use default
+        let pccs_url = std::env::var("PCCS_URL")
+            .unwrap_or_else(|_| "https://pccs.bittensor.com/sgx/certification/v4/".to_string());
+        
+        // Get collateral from PCCS or Intel PCS
+        let collateral = match dcap_qvl::collateral::get_collateral(&pccs_url, &quote_bytes).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to get collateral from PCCS, trying Intel PCS: {}", e);
+                // Fallback to Intel PCS
+                dcap_qvl::collateral::get_collateral_from_pcs(&quote_bytes)
+                    .await
+                    .context("Failed to get collateral from Intel PCS")?
+            }
+        };
+
+        // Verify the quote
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| anyhow!("time error"))?
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
+            
+        let verified_report = dcap_qvl::verify::verify(&quote_bytes, &collateral, now)
+            .context("Failed to verify TDX quote")?;
 
-        let _tcb = verify(&quote_bytes, &collateral_data, now)?;
+        info!("TDX quote verified successfully - TCB Status: {}", verified_report.status);
 
-        // Verify report_data matches sha256(nonce)
+        // Only accept quotes with valid TCB status
+        let valid_statuses = ["UpToDate", "SWHardeningNeeded", "ConfigurationNeeded"];
+        if !valid_statuses.contains(&verified_report.status.as_str()) {
+            return Err(anyhow!(
+                "Invalid TCB status: {}. Quote may be out of date or from unrecognized hardware.",
+                verified_report.status
+            ));
+        }
+
+        // Verify nonce binding
+        let quote_struct = dcap_qvl::quote::Quote::parse(&quote_bytes)
+            .map_err(|e| anyhow!("Failed to parse quote: {:?}", e))?;
+            
+        // Get report data based on report type
+        let report_data = match &quote_struct.report {
+            dcap_qvl::quote::Report::SgxEnclave(enclave_report) => &enclave_report.report_data,
+            dcap_qvl::quote::Report::TD10(td_report) => &td_report.report_data,
+            dcap_qvl::quote::Report::TD15(td_report) => &td_report.base.report_data,
+        };
+
+        // Verify report_data matches SHA256(nonce)
         let mut hasher = Sha256::new();
         hasher.update(nonce_bytes);
         let expected = hasher.finalize();
-        let expected_slice: &[u8] = expected.as_ref();
-
-        // TDX report_data location can vary slightly between quote versions.
-        // Try common offsets and accept a match against SHA256(nonce).
-        let candidate_offsets: [usize; 3] = [568, 576, 584];
-        let mut matched = false;
-        let mut matched_off: Option<usize> = None;
-        for off in candidate_offsets.iter() {
-            if quote_bytes.len() >= off + 32 {
-                let rd = &quote_bytes[*off..*off + 32];
-                if rd == expected_slice {
-                    matched = true;
-                    matched_off = Some(*off);
-                    break;
+        
+        if &report_data[..32] != expected.as_slice() {
+            return Err(anyhow!(
+                "Nonce binding verification failed: report_data does not match SHA256(nonce)"
+            ));
                 }
-            }
-        }
-        if !matched {
-            return Err(anyhow!("report_data mismatch"));
-        }
-        if let Some(off) = matched_off {
-            info!("Matched report_data at offset {}", off);
-        }
 
+        info!("✅ TDX quote fully verified with dcap-qvl");
         Ok(())
     }
 
@@ -745,11 +789,68 @@ impl ChallengeWsClient {
         None // Environment match verified or could not determine (non-blocking)
     }
 
+    /// Extract compose_hash from challenge event log
+    fn extract_challenge_compose_hash(&self, event_log: Option<&str>) -> Result<String> {
+        let event_log_str = event_log
+            .ok_or_else(|| anyhow::anyhow!("Missing event log - cannot extract compose_hash"))?;
+
+        // Parse event log JSON
+        let event_log_json: serde_json::Value = serde_json::from_str(event_log_str)
+            .context("Failed to parse event log")?;
+
+        // Look for event with type "compose-hash"
+        event_log_json
+            .as_array()
+            .and_then(|events| {
+                for event in events {
+                    if let Some(event_type) = event.get("event").and_then(|e| e.as_str()) {
+                        if event_type == "compose-hash" {
+                            if let Some(payload) = event.get("event_payload").and_then(|p| p.as_str()) {
+                                return Some(payload.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            })
+            .ok_or_else(|| anyhow::anyhow!("Missing compose-hash in event log"))
+    }
+
+    /// Verify challenge compose_hash matches expected value
+    async fn verify_challenge_compose_hash(
+        &self,
+        event_log: Option<&str>,
+        expected_compose_hash: &str,
+    ) -> Result<()> {
+        // Extract compose_hash from event_log
+        let challenge_compose_hash = self.extract_challenge_compose_hash(event_log)?;
+
+        info!(
+            "Compose hash comparison - Challenge: {}, Expected: {}",
+            challenge_compose_hash, expected_compose_hash
+        );
+
+        // Compare with expected compose_hash
+        if challenge_compose_hash != expected_compose_hash {
+            return Err(anyhow::anyhow!(
+                "Compose hash mismatch: challenge reports {} but expected {}. \
+                 The challenge is not running the expected docker-compose configuration.",
+                challenge_compose_hash,
+                expected_compose_hash
+            ));
+        }
+
+        info!("✅ Challenge compose_hash verified");
+        Ok(())
+    }
+
     /// Get validator TDX quote from dstack (if running in TDX CVM)
+    /// Uses official dstack SDK client (dstack_sdk::dstack_client::DstackClient)
     async fn get_validator_quote(&self, report_data: &[u8]) -> Result<ValidatorQuoteData> {
         use dstack_sdk::dstack_client::DstackClient;
 
-        let dstack_client = DstackClient::new(None); // Uses /var/run/dstack.sock by default
+        // Create client with default endpoint (/var/run/dstack.sock) or from DSTACK_SIMULATOR_ENDPOINT env var
+        let dstack_client = DstackClient::new(None);
 
         let quote_response = dstack_client
             .get_quote(report_data.to_vec())
@@ -790,7 +891,7 @@ impl ChallengeWsClient {
             });
 
         // Add environment_mode to event_log
-        let mut event_log = quote_response.event_log;
+        let mut event_log = quote_response.event_log.clone();
         if let Ok(event_log_json) = serde_json::from_str::<serde_json::Value>(&event_log) {
             let mut event_log_dict = event_log_json.as_object().cloned().unwrap_or_default();
             event_log_dict.insert(
@@ -809,8 +910,14 @@ impl ChallengeWsClient {
             .to_string();
         }
 
+        // Use the official decode_quote() method and encode to base64
+        let quote_bytes = quote_response
+            .decode_quote()
+            .context("Failed to decode quote from hex")?;
+        let quote_b64 = base64::encode(&quote_bytes);
+
         Ok(ValidatorQuoteData {
-            quote_b64: base64::encode(quote_response.quote),
+            quote_b64,
             event_log,
             rtmrs,
         })

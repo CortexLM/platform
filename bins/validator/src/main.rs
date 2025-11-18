@@ -36,8 +36,8 @@ use executor::DstackExecutor;
 use hotkey::get_keypair_from_mnemonic;
 use job_manager::JobManager;
 use network_proxy::{create_network_policy, NetworkProxy};
-use platform_engine_dynamic_values::DynamicValuesManager;
 use platform_engine_chain::{BlockSyncManager, SubtensorClient};
+use platform_engine_dynamic_values::DynamicValuesManager;
 use platform_verifier::PlatformVerifier;
 use secure_message::SecureMessage;
 
@@ -154,17 +154,15 @@ async fn main() -> Result<()> {
     // Initialize SubtensorClient (using default endpoint for now)
     let subtensor_endpoint = std::env::var("SUBTENSOR_ENDPOINT")
         .unwrap_or_else(|_| "wss://entrypoint-finney.opentensor.ai:443".to_string());
-    let subtensor_network = std::env::var("SUBTENSOR_NETWORK")
-        .unwrap_or_else(|_| "finney".to_string());
+    let subtensor_network =
+        std::env::var("SUBTENSOR_NETWORK").unwrap_or_else(|_| "finney".to_string());
     let subtensor_client = Arc::new(SubtensorClient::new(
         subtensor_endpoint.clone(),
         subtensor_network.clone(),
     ));
 
     // Initialize BlockSyncManager
-    let block_sync_manager = Arc::new(RwLock::new(BlockSyncManager::new(
-        subtensor_client.clone(),
-    )));
+    let block_sync_manager = Arc::new(RwLock::new(BlockSyncManager::new(subtensor_client.clone())));
 
     // Get netuid from environment or use default
     let netuid: u16 = std::env::var("NETUID")
@@ -186,7 +184,10 @@ async fn main() -> Result<()> {
 
     // Start block listener (connects to blockchain and listens for new blocks)
     if let Err(e) = subtensor_client.start_block_listener().await {
-        warn!("Failed to start block listener: {}. Will use simulated blocks.", e);
+        warn!(
+            "Failed to start block listener: {}. Will use simulated blocks.",
+            e
+        );
     } else {
         info!("✅ Block listener started - listening to blockchain for new blocks");
     }
@@ -197,7 +198,7 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(12));
         loop {
             interval.tick().await;
-            
+
             let mut block_sync = block_sync_manager_for_sync.write().await;
             if let Err(e) = block_sync.sync_block_from_client().await {
                 warn!("Failed to sync block from client: {}", e);
@@ -247,7 +248,7 @@ async fn main() -> Result<()> {
     let executor_clone = executor.clone();
     let keypair_clone = Arc::new(keypair);
     let challenge_manager_clone = challenge_manager.clone();
-    
+
     // Clone client for polling loop before moving it to WebSocket
     let client_poll = client.clone();
 
@@ -337,7 +338,9 @@ async fn main() -> Result<()> {
             // Poll for new challenges every 30 seconds
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-            if let Err(e) = poll_for_new_challenges(client_poll.clone(), challenge_manager_poll.clone()).await {
+            if let Err(e) =
+                poll_for_new_challenges(client_poll.clone(), challenge_manager_poll.clone()).await
+            {
                 error!("Error polling for new challenges: {}", e);
             }
         }
@@ -500,17 +503,14 @@ async fn handle_websocket_message(
                 challenge, dev_mode
             );
 
-            // Use the challenge as report_data to bind attestation to the challenge
-            let challenge_bytes =
-                hex::decode(challenge).unwrap_or_else(|_| challenge.as_bytes().to_vec());
-            let report_data = if challenge_bytes.len() <= 64 {
-                challenge_bytes
-            } else {
-                // Hash if too long
-                let mut hasher = Sha256::new();
-                hasher.update(challenge_bytes);
-                hasher.finalize().to_vec()
-            };
+            // Derive report_data from challenge (always bind using SHA256)
+            let report_data = derive_report_data_from_challenge(challenge);
+            let report_data_vec = report_data.to_vec();
+            let report_data_hash_hex = hex::encode(&report_data[..32]);
+            info!(
+                "Derived challenge-bound report_data (sha256): {}",
+                report_data_hash_hex
+            );
 
             if dev_mode {
                 // Dev mode: Generate mock attestation with compose_hash from challenge
@@ -531,7 +531,7 @@ async fn handle_websocket_message(
                 let report_offsets: [usize; 3] = [568, 576, 584];
                 for offset in &report_offsets {
                     if mock_quote.len() >= *offset + 32 {
-                        mock_quote[*offset..*offset + 32].copy_from_slice(&report_data);
+                        mock_quote[*offset..*offset + 32].copy_from_slice(&report_data[..32]);
                         break;
                     }
                 }
@@ -576,8 +576,6 @@ async fn handle_websocket_message(
                 .to_string();
 
                 // Convert report_data to hex string
-                let report_data_hex = hex::encode(&report_data);
-
                 info!(
                     "Generated mock TDX attestation with compose_hash: {}",
                     compose_hash
@@ -587,7 +585,7 @@ async fn handle_websocket_message(
                 match SecureMessage::attestation_response(
                     quote_b64,
                     event_log,
-                    report_data_hex,
+                    report_data_hash_hex,
                     "{}".to_string(), // vm_config (empty JSON for mock)
                     challenge.to_string(),
                     &keypair,
@@ -611,25 +609,45 @@ async fn handle_websocket_message(
                 }
             } else {
                 // Production mode: Get real TDX attestation from dstack guest agent
-                let dstack_client = DstackClient::new(None); // Uses /var/run/dstack.sock by default
+                // Using official dstack SDK client (dstack_sdk::dstack_client::DstackClient)
+                // Creates client with default endpoint (/var/run/dstack.sock) or from DSTACK_SIMULATOR_ENDPOINT env var
+                let dstack_client = DstackClient::new(None);
 
-                match dstack_client.get_quote(report_data).await {
+                match dstack_client.get_quote(report_data_vec.clone()).await {
                     Ok(quote_response) => {
                         info!("Generated TDX quote successfully");
                         info!("Quote: {} chars", quote_response.quote.len());
                         info!("Event log: {} chars", quote_response.event_log.len());
 
                         // Verify that the report_data in the quote matches the challenge
-                        let received_report_data = hex::encode(&quote_response.report_data);
+                        // Note: report_data is already hex-encoded from dstack SDK
                         info!(
                             "Received report_data from TDX quote: {}",
-                            received_report_data
+                            quote_response.report_data
                         );
                         info!("Expected challenge: {}", challenge);
 
+                        // Convert hex quote to base64 for consistency with platform-api expectations
+                        // Use the official decode_quote() method from GetQuoteResponse
+                        let quote_bytes = match quote_response.decode_quote() {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                error!("Failed to decode hex quote from dstack: {}", e);
+                                
+                                // Send error response (SIGNED)
+                                if let Ok(error_msg) = SecureMessage::error(format!("Failed to decode quote: {}", e), &keypair) {
+                                    if let Ok(msg_str) = serde_json::to_string(&error_msg) {
+                                        let _ = sender.send(msg_str).await;
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        };
+                        let quote_b64 = base64_engine.encode(&quote_bytes);
+                        
                         // Send attestation back via WebSocket to platform-api (SIGNED)
                         match SecureMessage::attestation_response(
-                            quote_response.quote,
+                            quote_b64,
                             quote_response.event_log,
                             quote_response.report_data,
                             quote_response.vm_config,
@@ -668,7 +686,9 @@ async fn handle_websocket_message(
         "orm_result" => {
             // (Logging removed for verbosity)
             let query_id = msg_json["query_id"].as_str().map(|s| s.to_string());
-            challenge_manager.handle_orm_result(msg_json.clone(), query_id).await;
+            challenge_manager
+                .handle_orm_result(msg_json.clone(), query_id)
+                .await;
         }
         _ => {
             // Handle other message types
@@ -677,6 +697,15 @@ async fn handle_websocket_message(
     }
 
     Ok(())
+}
+
+fn derive_report_data_from_challenge(challenge: &str) -> [u8; 64] {
+    let mut hasher = Sha256::new();
+    hasher.update(challenge.as_bytes());
+    let digest = hasher.finalize();
+    let mut report_data = [0u8; 64];
+    report_data[..digest.len()].copy_from_slice(&digest);
+    report_data
 }
 
 async fn poll_and_execute_jobs(
@@ -713,6 +742,21 @@ async fn monitor_challenges(job_manager: Arc<RwLock<JobManager>>) -> Result<()> 
     let mut manager = job_manager.write().await;
     manager.check_challenge_updates().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::Digest;
+
+    #[test]
+    fn derive_report_data_hashes_and_pads_challenge() {
+        let challenge = "08a22649887872d3739d3ec4da80ecaa826f51705656d1b0a0c9a2aff6ab3371";
+        let expected = Sha256::digest(challenge.as_bytes());
+        let report_data = derive_report_data_from_challenge(challenge);
+        assert_eq!(&report_data[..expected.len()], expected.as_slice());
+        assert!(report_data[expected.len()..].iter().all(|b| *b == 0));
+    }
 }
 
 async fn poll_for_new_challenges(

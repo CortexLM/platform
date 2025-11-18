@@ -59,8 +59,8 @@ hkdf = "0.12"
 rand_core = "0.6"
 aead = "0.5"
 
-# TDX Attestation
-dcap-qvl = "0.3"
+# DCAP Quote Verification
+dcap-qvl = { git = "https://github.com/Phala-Network/dcap-qvl.git", features = ["default", "report"] }
 
 # Substrate/Bittensor
 sp-core = { workspace = true }

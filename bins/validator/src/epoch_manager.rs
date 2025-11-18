@@ -144,9 +144,7 @@ impl EpochManager {
                 let next_sync_block = block_sync.get_next_sync_block();
                 info!(
                     "📊 Next epoch: block {} (in {} blocks) | Current: block {}",
-                    next_sync_block,
-                    sync_info.blocks_until_sync,
-                    sync_info.current_block
+                    next_sync_block, sync_info.blocks_until_sync, sync_info.current_block
                 );
             }
 
@@ -550,8 +548,11 @@ impl EpochManager {
             let ws_url = format!("{}/sdk/ws", ws_url.trim_end_matches('/'));
 
             // Create WebSocket client and request weights
-            let ws_client =
-                ChallengeWsClient::new(ws_url, self.validator_config.validator_hotkey.clone());
+            let ws_client = ChallengeWsClient::new(
+                ws_url,
+                self.validator_config.validator_hotkey.clone(),
+                compose_hash.to_string(),
+            );
 
             match ws_client
                 .request_weights(block, self.config.weight_query_timeout)

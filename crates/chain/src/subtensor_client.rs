@@ -64,7 +64,10 @@ impl SubtensorClient {
         let current_block = self.current_block.clone();
 
         tokio::spawn(async move {
-            info!("Connecting to Subtensor at {} to listen for blocks", endpoint);
+            info!(
+                "Connecting to Subtensor at {} to listen for blocks",
+                endpoint
+            );
 
             // Connect to Bittensor using bittensor-rs
             let client = match BittensorClient::new(&endpoint).await {
@@ -78,7 +81,8 @@ impl SubtensorClient {
                         endpoint, e
                     );
                     // Retry connection in a loop
-                    let mut retry_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                    let mut retry_interval =
+                        tokio::time::interval(tokio::time::Duration::from_secs(5));
                     loop {
                         retry_interval.tick().await;
                         match BittensorClient::new(&endpoint).await {
@@ -215,10 +219,7 @@ impl SubtensorClient {
     }
 
     /// Update metagraph weights on sync blocks
-    pub async fn update_weights_on_sync_block(
-        &self,
-        weights: BTreeMap<String, f64>,
-    ) -> Result<()> {
+    pub async fn update_weights_on_sync_block(&self, weights: BTreeMap<String, f64>) -> Result<()> {
         let current_block = *self.current_block.read().await;
         if !self.is_sync_block(current_block) {
             warn!(

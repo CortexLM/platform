@@ -1,11 +1,10 @@
 use crate::challenge_manager::ChallengeManager;
 use crate::config::ValidatorConfig;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use platform_engine_api_client::JobInfo;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 pub struct DstackExecutor {
     config: ValidatorConfig,
@@ -31,10 +30,7 @@ impl DstackExecutor {
         // Forward job to challenge container via WebSocket
         // The challenge will execute the job and store results via ORM
         // Ensure payload includes required fields
-        let job_payload_value = job
-            .payload
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
+        let job_payload_value = job.payload.clone().unwrap_or_else(|| serde_json::json!({}));
 
         let mut payload_map: serde_json::Map<String, Value> = match job_payload_value {
             Value::Object(map) => map,

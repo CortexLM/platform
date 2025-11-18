@@ -39,6 +39,9 @@ services:
       
       # Dstack socket for communication with guest agent
       - /var/run/dstack.sock:/var/run/dstack.sock
+      
+      # Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18080/health"]
       interval: 30s

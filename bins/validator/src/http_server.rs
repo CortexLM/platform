@@ -836,7 +836,7 @@ async fn attest(
     State(state): State<AppState>,
     Json(req): Json<AttestSdkRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Validate TDX attestation locally using dcap-qvl
+        // Validate TDX attestation locally
     let attestation = &req.attestation;
     let attestation_type = attestation.get("attestation_type").and_then(|v| v.as_str());
 
@@ -858,29 +858,51 @@ async fn attest(
         // Decode quote from base64
         let quote_bytes = base64::decode(quote_b64).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        // Verify TDX quote using dcap-qvl (Intel's verification library)
-        use dcap_qvl::{collateral, verify::verify};
-        let collateral_data = match collateral::get_collateral_from_pcs(&quote_bytes).await {
+        // Verify TDX quote using dcap-qvl
+        tracing::info!("Verifying TDX quote with dcap-qvl: {} bytes", quote_bytes.len());
+
+        // Get PCCS URL from environment or use default
+        let pccs_url = std::env::var("PCCS_URL")
+            .unwrap_or_else(|_| "https://pccs.bittensor.com/sgx/certification/v4/".to_string());
+        
+        // Get collateral and verify quote
+        let collateral = match dcap_qvl::collateral::get_collateral(&pccs_url, &quote_bytes).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Failed to get collateral from Intel PCS: {}", e);
-                return Err(StatusCode::BAD_GATEWAY);
+                tracing::warn!("Failed to get collateral from PCCS, trying Intel PCS: {}", e);
+                dcap_qvl::collateral::get_collateral_from_pcs(&quote_bytes)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             }
         };
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .as_secs();
-        match verify(&quote_bytes, &collateral_data, now) {
-            Ok(tcb) => {
-                tracing::info!("TDX quote verified, TCB status: {:?}", tcb.status);
-            }
-            Err(e) => {
-                tracing::error!("TDX quote verification failed: {:?}", e);
-                return Err(StatusCode::UNAUTHORIZED);
-            }
+            
+        let verified_report = dcap_qvl::verify::verify(&quote_bytes, &collateral, now)
+            .map_err(|e| {
+                tracing::error!("Failed to verify TDX quote: {:?}", e);
+                StatusCode::BAD_REQUEST
+            })?;
+
+        // Check TCB status
+        let valid_statuses = ["UpToDate", "SWHardeningNeeded", "ConfigurationNeeded"];
+        if !valid_statuses.contains(&verified_report.status.as_str()) {
+            tracing::error!("Invalid TCB status: {}", verified_report.status);
+            return Err(StatusCode::BAD_REQUEST);
         }
+
+        // Parse quote to get report data
+        let quote_struct = dcap_qvl::quote::Quote::parse(&quote_bytes)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+            
+        let report_data = match &quote_struct.report {
+            dcap_qvl::quote::Report::SgxEnclave(enclave_report) => &enclave_report.report_data,
+            dcap_qvl::quote::Report::TD10(td_report) => &td_report.report_data,
+            dcap_qvl::quote::Report::TD15(td_report) => &td_report.base.report_data,
+        };
 
         // Verify nonce binding: report_data must match SHA256(nonce)
         use sha2::{Digest, Sha256};
@@ -888,18 +910,8 @@ async fn attest(
         hasher.update(nonce_str.as_bytes());
         let expected_report_data = hasher.finalize();
 
-        // Extract report_data from TDX quote (offset 368, 32 bytes)
-        if quote_bytes.len() < 400 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let report_data_offset = 368;
-        if quote_bytes.len() < report_data_offset + 32 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let report_data = &quote_bytes[report_data_offset..report_data_offset + 32];
-
         // Verify report_data matches expected nonce hash
-        if report_data != expected_report_data.as_slice() {
+        if &report_data[..32] != expected_report_data.as_slice() {
             tracing::error!("Report data mismatch: nonce binding failed");
             return Err(StatusCode::UNAUTHORIZED);
         }

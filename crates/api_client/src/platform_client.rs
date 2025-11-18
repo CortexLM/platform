@@ -138,7 +138,10 @@ impl PlatformClient {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                warn!("No agent_hash in job {} payload - using 'unknown' fallback", job_id);
+                warn!(
+                    "No agent_hash in job {} payload - using 'unknown' fallback",
+                    job_id
+                );
                 "unknown".to_string()
             });
 
@@ -222,7 +225,7 @@ impl PlatformClient {
         let result: serde_json::Value = resp.json().await?;
         Ok(result)
     }
-    
+
     /// Send ORM query via WebSocket connection
     /// This method should be called from within the WebSocket callback
     pub async fn send_orm_query_via_websocket(
@@ -238,10 +241,12 @@ impl PlatformClient {
             "challenge_id": challenge_id,
             "query_id": query_id
         });
-        
-        ws_sender.send(serde_json::to_string(&message)?).await
+
+        ws_sender
+            .send(serde_json::to_string(&message)?)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to send ORM query via WebSocket: {}", e))?;
-        
+
         Ok(())
     }
 

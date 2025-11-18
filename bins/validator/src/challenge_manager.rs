@@ -140,7 +140,8 @@ pub struct ChallengeManager {
     gateway_url: Option<String>, // Gateway URL for CVM-to-CVM communication
     dynamic_values: Arc<DynamicValuesManager>, // For storing private environment variables
     platform_ws_sender: Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::mpsc::Sender<String>>>>>, // Platform API WebSocket sender
-    orm_query_routing: Arc<RwLock<HashMap<String, (String, tokio::sync::mpsc::Sender<serde_json::Value>)>>>, // Key: query_id, Value: (compose_hash, challenge_ws_sender)
+    orm_query_routing:
+        Arc<RwLock<HashMap<String, (String, tokio::sync::mpsc::Sender<serde_json::Value>)>>>, // Key: query_id, Value: (compose_hash, challenge_ws_sender)
 }
 
 impl ChallengeManager {
@@ -181,7 +182,7 @@ impl ChallengeManager {
         let mut guard = self.platform_ws_sender.lock().await;
         *guard = Some(sender);
     }
-    
+
     /// Handle ORM result from platform API and forward to the appropriate challenge
     pub async fn handle_orm_result(&self, result: serde_json::Value, query_id: Option<String>) {
         if let Some(qid) = query_id {
@@ -191,19 +192,22 @@ impl ChallengeManager {
                 let compose_hash = compose_hash.clone();
                 let sender = sender.clone();
                 drop(routing_guard); // Release the lock early
-                
+
                 // Create response message
                 let mut response = serde_json::json!({
                     "type": "orm_result",
                     "result": result.get("result").unwrap_or(&result).clone()
                 });
                 response["query_id"] = serde_json::Value::String(qid.clone());
-                
+
                 // Send response to challenge
                 if let Err(e) = sender.send(response).await {
-                    warn!("Failed to forward ORM result to challenge {}: {}", compose_hash, e);
+                    warn!(
+                        "Failed to forward ORM result to challenge {}: {}",
+                        compose_hash, e
+                    );
                 }
-                
+
                 // Clean up routing entry
                 let mut routing_guard = self.orm_query_routing.write().await;
                 routing_guard.remove(&qid);
@@ -697,6 +701,7 @@ impl ChallengeManager {
                             let client = ChallengeWsClient::new(
                                 ws_url.clone(),
                                 self.client.validator_hotkey.clone(),
+                                compose_hash_clone.clone(),
                             );
                             let compose_hash_for_log = compose_hash_clone.clone();
                             let compose_hash_for_spawn = compose_hash_clone.clone();
@@ -705,7 +710,7 @@ impl ChallengeManager {
                             let ws_sender_for_store = ws_sender_arc.clone();
                             let platform_ws_sender_spawn = self.platform_ws_sender.clone();
                             let orm_query_routing_spawn = self.orm_query_routing.clone();
-                            
+
                             tokio::spawn(async move {
                                 // on_ready callback: store sender and initialize ORM bridge
                                 let ws_sender_for_ready = ws_sender_for_store.clone();
@@ -716,22 +721,25 @@ impl ChallengeManager {
                                     let sender_clone = sender.clone();
                                     let ws_sender_store = ws_sender_for_ready.clone();
                                     let compose_hash_log = compose_hash_for_ready.clone();
-                                    
+
                                     // Store sender asynchronously (non-blocking)
                                     tokio::spawn(async move {
                                         let mut guard = ws_sender_store.lock().await;
                                         // Always update the sender, even if one already exists (in case of reconnection with new keys)
                                         *guard = Some(sender_clone.clone());
                                         info!("✅ WebSocket sender stored/updated for challenge {} (ready for job_execute)", compose_hash_log);
-                                        
+
                                         // Initialize ORM bridge: send orm_ready without schema
                                         // Platform API will resolve the correct schema when processing ORM queries
                                         let orm_ready_msg = serde_json::json!({
                                             "type": "orm_ready"
                                         });
-                                        
+
                                         if let Err(e) = sender_clone.send(orm_ready_msg).await {
-                                            error!("Failed to send orm_ready to challenge {}: {}", compose_hash_log, e);
+                                            error!(
+                                                "Failed to send orm_ready to challenge {}: {}",
+                                                compose_hash_log, e
+                                            );
                                         } else {
                                             info!("✅ Sent orm_ready signal to challenge {} (schema will be resolved by platform-api)", compose_hash_log);
                                         }
@@ -772,7 +780,7 @@ impl ChallengeManager {
                                         });
                                     }
                                 };
-                                
+
                                 // Use the cloned versions from outside the tokio::spawn
                                 let platform_ws_sender_for_orm = platform_ws_sender_spawn.clone();
                                 let orm_query_routing_for_orm = orm_query_routing_spawn.clone();
@@ -784,23 +792,32 @@ impl ChallengeManager {
                                         match typ {
                                             "heartbeat" => {
                                                 if let Some(payload) = json.get("payload") {
-                                                    if let Err(e) = forward_heartbeat(payload.clone()) {
-                                                        warn!("forward heartbeat error: {}", e);
-                                                    }
+                                                    let payload_clone = payload.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = forward_heartbeat(payload_clone).await {
+                                                            warn!("forward heartbeat error: {}", e);
+                                                        }
+                                                    });
                                                 }
                                             }
                                             "logs" => {
                                                 if let Some(payload) = json.get("payload") {
-                                                    if let Err(e) = forward_logs(payload.clone()) {
-                                                        warn!("forward logs error: {}", e);
-                                                    }
+                                                    let payload_clone = payload.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = forward_logs(payload_clone).await {
+                                                            warn!("forward logs error: {}", e);
+                                                        }
+                                                    });
                                                 }
                                             }
                                             "submit" => {
                                                 if let Some(payload) = json.get("payload") {
-                                                    if let Err(e) = forward_submit(payload.clone()) {
-                                                        warn!("forward submit error: {}", e);
-                                                    }
+                                                    let payload_clone = payload.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = forward_submit(payload_clone).await {
+                                                            warn!("forward submit error: {}", e);
+                                                        }
+                                                    });
                                                 }
                                             }
                                             "orm_query" => {
@@ -1073,7 +1090,7 @@ impl ChallengeManager {
             let dstack_config = spec.dstack_config.as_ref();
 
             // Parse docker-compose YAML
-            let mut compose_doc: serde_yaml::Value = serde_yaml::from_str(&compose_yaml_str)
+            let compose_doc: serde_yaml::Value = serde_yaml::from_str(&compose_yaml_str)
                 .context("Failed to parse docker-compose YAML")?;
 
             // No longer inject VALIDATOR_BASE_URL; WS is validator-initiated
@@ -1335,7 +1352,7 @@ impl ChallengeManager {
             std::env::var("PLATFORM_BASE_API")
                 .unwrap_or_else(|_| "http://platform-api:15000".to_string()),
         );
-        
+
         // Add CHUTES_API_TOKEN if available (required for LLM proxy)
         if let Ok(chutes_token) = std::env::var("CHUTES_API_TOKEN") {
             env_vars.insert("CHUTES_API_TOKEN".to_string(), chutes_token);
@@ -1401,16 +1418,14 @@ impl ChallengeManager {
 
         // Create container configuration
         let container_name = format!("challenge-{}", compose_hash_clone);
-        
+
         // Mount Docker socket to enable terminal-bench to create test containers
-        let mut volumes = vec![
-            crate::docker_client::VolumeMapping {
-                host_path: "/var/run/docker.sock".to_string(),
-                container_path: "/var/run/docker.sock".to_string(),
-                read_only: false,
-            }
-        ];
-        
+        let volumes = vec![crate::docker_client::VolumeMapping {
+            host_path: "/var/run/docker.sock".to_string(),
+            container_path: "/var/run/docker.sock".to_string(),
+            read_only: false,
+        }];
+
         let container_config = ContainerConfig {
             name: container_name.clone(),
             image,
@@ -1594,7 +1609,7 @@ impl ChallengeManager {
         }
 
         // VMM CVM: original logic with instance_id handling
-        let mut challenges = self.challenges.write().await;
+        let challenges = self.challenges.write().await;
 
         // Check if instance_id is empty (URL starts with - after https://)
         // Pattern: https://-10000.domain:port vs https://abc123-10000.domain:port
@@ -1903,36 +1918,39 @@ impl ChallengeManager {
     }
 }
 
-fn forward_heartbeat(payload: serde_json::Value) -> Result<()> {
+async fn forward_heartbeat(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
         .unwrap_or_else(|_| "http://platform-api:3000".to_string());
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let _ = client
         .post(format!("{}/results/heartbeat", platform_api_url))
         .json(&payload)
-        .send();
+        .send()
+        .await;
     Ok(())
 }
 
-fn forward_logs(payload: serde_json::Value) -> Result<()> {
+async fn forward_logs(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
         .unwrap_or_else(|_| "http://platform-api:3000".to_string());
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let _ = client
         .post(format!("{}/results/logs", platform_api_url))
         .json(&payload)
-        .send();
+        .send()
+        .await;
     Ok(())
 }
 
-fn forward_submit(payload: serde_json::Value) -> Result<()> {
+async fn forward_submit(payload: serde_json::Value) -> Result<()> {
     let platform_api_url = std::env::var("PLATFORM_API_URL")
         .unwrap_or_else(|_| "http://platform-api:3000".to_string());
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let _ = client
         .post(format!("{}/results/submit", platform_api_url))
         .json(&payload)
-        .send();
+        .send()
+        .await;
     Ok(())
 }
 

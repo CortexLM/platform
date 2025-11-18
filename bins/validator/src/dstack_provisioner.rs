@@ -10,7 +10,9 @@ pub struct DstackProvisioner {
 impl DstackProvisioner {
     pub fn new() -> Self {
         Self {
-            client: DstackClient::new(None), // Uses /var/run/dstack.sock
+            // Using official dstack SDK client (dstack_sdk::dstack_client::DstackClient)
+            // Creates client with default endpoint (/var/run/dstack.sock) or from DSTACK_SIMULATOR_ENDPOINT env var
+            client: DstackClient::new(None),
         }
     }
 
