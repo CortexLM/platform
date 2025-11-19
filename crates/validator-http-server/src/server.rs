@@ -1,7 +1,7 @@
 use crate::attestation::{attest, attestation_challenge};
 use crate::handlers::{
-    challenge_callback, challenge_cleanup, delete_value, get_all_values, get_quota_status,
-    get_value, health_check, init_challenge_quota, release_cvm, request_cvm, results_heartbeat,
+    challenge_callback, challenge_cleanup, delete_value, get_all_values,
+    get_value, health_check, release_cvm, request_cvm, results_heartbeat,
     results_log, results_submit, set_value,
 };
 use crate::middleware::verify_signed_request;
@@ -12,7 +12,6 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use platform_engine_dynamic_values::DynamicValuesManager;
 use platform_validator_challenge_manager::ChallengeManager;
-use platform_validator_quota::CVMQuotaManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,7 +22,6 @@ use tracing::info;
 pub async fn start_http_server(
     dynamic_values_manager: Arc<DynamicValuesManager>,
     network_proxy: Option<Arc<dyn NetworkProxyTrait + Send + Sync>>,
-    cvm_quota_manager: Arc<CVMQuotaManager>,
     challenge_manager: Arc<ChallengeManager>,
     job_vm_manager: Arc<dyn JobVmManagerTrait + Send + Sync>,
 ) -> Result<()> {
@@ -34,7 +32,6 @@ pub async fn start_http_server(
     
     let app_state = AppState {
         dynamic_values: dynamic_values_manager,
-        cvm_quota: cvm_quota_manager,
         challenge_manager,
         job_vm: job_vm_manager,
         network_proxy: network_proxy_clone.clone(),
@@ -66,8 +63,6 @@ pub async fn start_http_server(
         )
         .route("/api/cvm/request", post(request_cvm))
         .route("/api/cvm/release/:cvm_id", post(release_cvm))
-        .route("/api/cvm/quota/:challenge_id", get(get_quota_status))
-        .route("/api/cvm/init", post(init_challenge_quota))
         .route(
             "/challenge/:compose_hash/callback",
             post(challenge_callback),

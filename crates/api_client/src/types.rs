@@ -47,57 +47,13 @@ pub enum ChallengeStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChallengeDetailResponse {
     pub metadata: ChallengeMetadata,
-    pub harness: Option<HarnessBundle>,
-    pub datasets: Vec<DatasetArtifact>,
     pub emissions: Option<EmissionsSchedule>,
 }
 
-/// Harness bundle
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HarnessBundle {
-    pub digest: String,
-    pub size: u64,
-    pub image_ref: Option<String>,
-    pub manifest: Option<String>,
-    pub config: HarnessConfig,
-}
-
-/// Harness configuration
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HarnessConfig {
-    pub runtime: RuntimeType,
-    pub resources: ResourceLimits,
-    pub timeout: u64,
-    pub environment: BTreeMap<String, String>,
-}
-
-/// Runtime type
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub enum RuntimeType {
-    Standard,
-    Sgx,
-    Sev,
-    WasmEnclave,
-}
-
-/// Resource limits
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ResourceLimits {
-    pub cpu_cores: u32,
-    pub memory_mb: u64,
-    pub disk_mb: u64,
-    pub network_enabled: bool,
-}
-
-/// Dataset artifact
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DatasetArtifact {
-    pub digest: String,
-    pub size: u64,
-    pub format: String,
-    pub compression: Option<String>,
-    pub checksum: String,
-}
+// HarnessBundle removed
+// HarnessConfig removed
+// ResourceLimits removed
+// DatasetArtifact removed
 
 /// Emissions schedule
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,8 +131,6 @@ pub struct ClaimJobRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClaimJobResponse {
     pub job: JobMetadata,
-    pub harness: HarnessBundle,
-    pub datasets: Vec<DatasetArtifact>,
     pub config: JobConfig,
 }
 
@@ -222,7 +176,6 @@ pub enum JobPriority {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobConfig {
     pub timeout: u64,
-    pub resources: ResourceLimits,
     pub environment: BTreeMap<String, String>,
     pub attestation_required: bool,
     pub policy: Option<String>,

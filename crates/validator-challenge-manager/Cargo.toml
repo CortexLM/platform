@@ -15,7 +15,6 @@ platform-validator-core = { workspace = true }
 platform-validator-websocket = { workspace = true }
 platform-validator-docker = { workspace = true }
 platform-validator-vmm = { workspace = true }
-platform-validator-quota = { workspace = true }
 
 # Core dependencies
 anyhow = { workspace = true }

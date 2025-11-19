@@ -12,7 +12,6 @@ repository.workspace = true
 platform-engine-dynamic-values = { workspace = true }
 platform-validator-core = { workspace = true }
 platform-validator-challenge-manager = { workspace = true }
-platform-validator-quota = { workspace = true }
 
 # Core dependencies
 anyhow = { workspace = true }

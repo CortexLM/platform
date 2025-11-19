@@ -1,4 +1,3 @@
-use platform_validator_quota::{CVMQuotaManager, ResourceRequest};
 use platform_validator_vmm::VmmClient;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -13,7 +12,6 @@ use async_trait::async_trait;
 pub struct JobVmManager {
     vmm_client: VmmClient,
     job_vms: Arc<RwLock<HashMap<String, JobVm>>>,
-    quota_manager: Arc<CVMQuotaManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,11 +27,10 @@ struct JobVm {
 }
 
 impl JobVmManager {
-    pub fn new(vmm_client: VmmClient, quota_manager: Arc<CVMQuotaManager>) -> Self {
+    pub fn new(vmm_client: VmmClient) -> Self {
         Self {
             vmm_client,
             job_vms: Arc::new(RwLock::new(HashMap::new())),
-            quota_manager,
         }
     }
 
@@ -171,19 +168,6 @@ impl JobVmManager {
                 warn!("Failed to remove expired job VM {}: {}", vm_id, e);
             }
 
-            // Release quota
-            let _ = self
-                .quota_manager
-                .release(
-                    &challenge_name,
-                    ResourceRequest {
-                        cpu_cores: vcpu,
-                        memory_mb,
-                        disk_mb,
-                    },
-                )
-                .await;
-
             // Remove from tracking
             let mut job_vms = self.job_vms.write().await;
             job_vms.remove(&job_id);
@@ -211,19 +195,6 @@ impl JobVmManager {
             if let Err(e) = self.vmm_client.remove_vm(&jvm.vm_id).await {
                 warn!("Failed to remove job VM {}: {}", jvm.vm_id, e);
             }
-
-            // Release quota
-            let _ = self
-                .quota_manager
-                .release(
-                    &jvm.challenge_name,
-                    ResourceRequest {
-                        cpu_cores: jvm.vcpu,
-                        memory_mb: jvm.memory_mb,
-                        disk_mb: jvm.disk_mb,
-                    },
-                )
-                .await;
         }
 
         Ok(())
@@ -292,21 +263,6 @@ impl JobVmManager {
             // Remove VM
             if let Err(e) = self.vmm_client.remove_vm(&vm_id).await {
                 warn!("Failed to remove VM {}: {}", vm_id, e);
-            }
-
-            // Release quota if VM was tracked
-            if vcpu > 0 {
-                let _ = self
-                    .quota_manager
-                    .release(
-                        challenge_name,
-                        ResourceRequest {
-                            cpu_cores: vcpu,
-                            memory_mb,
-                            disk_mb,
-                        },
-                    )
-                    .await;
             }
 
             // Remove from in-memory tracking

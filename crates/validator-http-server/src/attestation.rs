@@ -240,3 +240,4 @@ fn extract_app_info_from_event_log(
     Ok((app_id, instance_id, compose_hash))
 }
 
+

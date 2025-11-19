@@ -4,7 +4,6 @@ use chrono::Utc;
 use platform_validator_core::ChallengeSpec;
 use platform_validator_core::ChallengeState;
 use platform_validator_docker::{ContainerConfig, DockerClient, PortMapping as DockerPortMapping, VolumeMapping};
-use platform_validator_quota::{QuotaResult, ResourceRequest};
 use platform_validator_vmm::{VmmClient, VmConfiguration};
 use serde_json;
 use serde_yaml;
@@ -38,33 +37,7 @@ pub async fn provision_cvm(manager: &ChallengeManager, spec: ChallengeSpec) -> R
             .unwrap_or(20) as u64
             * 1024;
 
-        let resource_request = ResourceRequest {
-            cpu_cores: spec.resources.vcpu,
-            memory_mb: memory_mb as u64,
-            disk_mb,
-        };
-
-        match manager.quota_manager().reserve(&compose_hash_clone, resource_request).await {
-            Ok(QuotaResult::Granted) => {
-                info!("Quota granted for challenge {}", compose_hash_clone);
-            }
-            Ok(QuotaResult::Insufficient) => {
-                warn!("Insufficient quota for challenge {}, backing off", compose_hash_clone);
-                let mut challenges = manager.challenges().write().await;
-                if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
-                    instance.state = ChallengeState::Failed;
-                }
-                return Err(anyhow::anyhow!("Insufficient quota for challenge"));
-            }
-            Err(e) => {
-                error!("Quota check failed: {}", e);
-                let mut challenges = manager.challenges().write().await;
-                if let Some(instance) = challenges.get_mut(&compose_hash_clone) {
-                    instance.state = ChallengeState::Failed;
-                }
-                return Err(e);
-            }
-        }
+        // Quota system removed - proceed directly to provisioning
 
         let compose_yaml = base64::decode(&spec.compose_yaml)
             .map_err(|e| anyhow::anyhow!("Failed to decode compose_yaml from base64: {}", e))?;
@@ -204,18 +177,6 @@ pub async fn provision_cvm(manager: &ChallengeManager, spec: ChallengeSpec) -> R
                 Err(e) => {
                     error!("Failed to provision CVM: {}", e);
                     instance.state = ChallengeState::Failed;
-                    drop(challenges);
-                    let _ = manager
-                        .quota_manager()
-                        .release(
-                            &compose_hash_clone,
-                            ResourceRequest {
-                                cpu_cores: spec.resources.vcpu,
-                                memory_mb: memory_mb as u64,
-                                disk_mb,
-                            },
-                        )
-                        .await;
                 }
             }
         }

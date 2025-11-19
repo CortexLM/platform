@@ -4,7 +4,6 @@ use platform_engine_api_client::PlatformClient;
 use platform_engine_dynamic_values::DynamicValuesManager;
 use platform_validator_core::{ChallengeSpec, ChallengeState, ValidatorChallengeStatus};
 use platform_validator_docker::{ContainerConfig, DockerClient, PortMapping as DockerPortMapping};
-use platform_validator_quota::{CVMQuotaManager, QuotaResult, ResourceRequest};
 use platform_validator_vmm::{VmmClient, VmConfiguration};
 use platform_validator_websocket::ChallengeWsClient;
 use serde_json;
@@ -34,7 +33,6 @@ pub struct ChallengeManager {
     challenges_by_name: Arc<RwLock<HashMap<String, String>>>,
     pub challenge_specs: Arc<RwLock<HashMap<String, ChallengeSpec>>>,
     status_sender: Arc<Mutex<Option<Arc<mpsc::Sender<String>>>>>,
-    quota_manager: Arc<CVMQuotaManager>,
     validator_base_url: String,
     gateway_url: Option<String>,
     dynamic_values: Arc<DynamicValuesManager>,
@@ -46,7 +44,6 @@ impl ChallengeManager {
     pub fn new(
         client: PlatformClient,
         vmm_url: String,
-        quota_manager: Arc<CVMQuotaManager>,
         dynamic_values: Arc<DynamicValuesManager>,
         docker_client: Option<Arc<DockerClient>>,
         docker_network: String,
@@ -65,7 +62,6 @@ impl ChallengeManager {
             challenges_by_name: Arc::new(RwLock::new(HashMap::new())),
             challenge_specs: Arc::new(RwLock::new(HashMap::new())),
             status_sender: Arc::new(Mutex::new(None)),
-            quota_manager,
             validator_base_url,
             gateway_url: None,
             dynamic_values,
@@ -186,10 +182,6 @@ impl ChallengeManager {
             };
 
             specs_map.insert(compose_hash.clone(), spec.clone());
-
-            self.quota_manager
-                .register_or_update_challenge(compose_hash.clone(), spec.emission_share)
-                .await;
 
             if !challenges.contains_key(&compose_hash) {
                 let instance = ChallengeInstance {
@@ -438,10 +430,6 @@ impl ChallengeManager {
 
     pub(crate) fn challenge_specs(&self) -> &Arc<RwLock<HashMap<String, ChallengeSpec>>> {
         &self.challenge_specs
-    }
-
-    pub(crate) fn quota_manager(&self) -> &Arc<CVMQuotaManager> {
-        &self.quota_manager
     }
 
     pub(crate) fn dynamic_values(&self) -> &Arc<DynamicValuesManager> {

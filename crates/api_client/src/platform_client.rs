@@ -181,13 +181,35 @@ impl PlatformClient {
 
     /// Submit evaluation results
     pub async fn submit_results(&self, job_id: &str, results: SubmissionResults) -> Result<()> {
-        let url = format!("{}/jobs/{}/results", self.base_url, job_id);
+        let url = format!("{}/api/jobs/{}/results", self.base_url, job_id);
         let client = reqwest::Client::new();
+
+        // Convert SubmissionResults to SubmitResultRequest JSON format expected by platform-api
+        let submit_request = json!({
+            "job_id": job_id,
+            "result": {
+                "job_id": job_id,
+                "submission_id": job_id, // Use job_id as submission_id fallback
+                "scores": results.scores,
+                "metrics": {},
+                "logs": results.logs,
+                "error": results.error,
+                "execution_time": results.execution_time_ms,
+                "resource_usage": {
+                    "cpu_time": 0,
+                    "memory_peak": 0,
+                    "disk_usage": 0,
+                    "network_bytes": 0
+                },
+                "attestation_receipt": null
+            },
+            "receipts": []
+        });
 
         client
             .post(&url)
             .header("X-Validator-Hotkey", &self.validator_hotkey)
-            .json(&results)
+            .json(&submit_request)
             .send()
             .await?;
 

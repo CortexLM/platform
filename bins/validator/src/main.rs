@@ -23,7 +23,6 @@ mod secure_message;
 
 // Use extracted crates instead of local modules
 use platform_validator_challenge_manager::ChallengeManager;
-use platform_validator_quota::{CVMQuotaManager, ResourceCapacity};
 use platform_validator_docker::DockerClient;
 use platform_validator_vmm::VmmClient;
 use platform_validator_epoch_manager::{EpochConfig, EpochManager, ValidatorConfigTrait, spawn_epoch_manager};
@@ -78,14 +77,6 @@ async fn main() -> Result<()> {
 
     // Executor will be initialized after challenge_manager is created
 
-    // Initialize CVM quota manager with capacity from config
-    let capacity = ResourceCapacity {
-        cpu_cores: config.resource_limits.cpu_cores,
-        memory_mb: config.resource_limits.memory_mb,
-        disk_mb: config.resource_limits.disk_mb,
-    };
-    let cvm_quota_manager = Arc::new(CVMQuotaManager::with_capacity(capacity));
-
     // Initialize VMM client
     let vmm_url = config.dstack_vmm_url.clone();
     // Note: vmm_client is created inside ChallengeManager, not needed here
@@ -130,7 +121,6 @@ async fn main() -> Result<()> {
     let challenge_manager = Arc::new(ChallengeManager::new(
         client.clone(),
         vmm_url.clone(),
-        cvm_quota_manager.clone(),
         dynamic_values_manager.clone(),
         docker_client,
         config.docker_network.clone(),
@@ -224,36 +214,9 @@ async fn main() -> Result<()> {
     spawn_epoch_manager(epoch_manager);
     info!("✅ Epoch manager started and monitoring for weight submission");
 
-    // Start background task to recompute quota reservations every 5s
-    let challenge_manager_for_quota = challenge_manager.clone();
-    let cvm_quota_manager_for_quota = cvm_quota_manager.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-
-            // Gather active challenges with their emission_share
-            let specs = challenge_manager_for_quota.challenge_specs.read().await;
-            let active_challenges: Vec<(String, f64)> = specs
-                .values()
-                .map(|spec| (spec.compose_hash.clone(), spec.emission_share))
-                .collect();
-            drop(specs);
-
-            // Recompute reservations
-            cvm_quota_manager_for_quota
-                .recompute_reservations(&active_challenges)
-                .await;
-
-            // Decay demand EMA
-            cvm_quota_manager_for_quota.decay_demand().await;
-        }
-    });
-
     // Initialize job VM manager
     let job_vm_manager = Arc::new(job_vm_manager::JobVmManager::new(
         VmmClient::new(vmm_url.clone()),
-        cvm_quota_manager.clone(),
     ));
 
     // Start WebSocket listener
@@ -409,9 +372,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Initialize CVM quota manager
-    let cvm_quota_manager = Arc::new(CVMQuotaManager::new());
-
     // Initialize network proxy from config
     let policy = create_network_policy(&serde_json::json!({}));
     let network_proxy = Arc::new(NetworkProxy::new(policy));
@@ -419,14 +379,12 @@ async fn main() -> Result<()> {
     // Start HTTP server for dynamic values, network proxy, and CVM quota API
     let dynamic_values_clone = dynamic_values_manager.clone();
     let network_proxy_clone = network_proxy.clone();
-    let cvm_quota_clone = cvm_quota_manager.clone();
     let challenge_manager_http = challenge_manager.clone();
     let job_vm_clone = job_vm_manager.clone();
     tokio::spawn(async move {
         if let Err(e) = start_http_server(
             dynamic_values_clone,
             Some(network_proxy_clone as Arc<dyn platform_validator_http_server::NetworkProxyTrait + Send + Sync>),
-            cvm_quota_clone,
             challenge_manager_http,
             job_vm_clone as Arc<dyn platform_validator_http_server::JobVmManagerTrait + Send + Sync>,
         )
@@ -631,6 +589,13 @@ async fn handle_websocket_message(
                         info!("Generated TDX quote successfully");
                         info!("Quote: {} chars", quote_response.quote.len());
                         info!("Event log: {} chars", quote_response.event_log.len());
+                        info!("VM config: {} chars", quote_response.vm_config.len());
+                        
+                        if quote_response.vm_config.is_empty() {
+                            warn!("⚠️  VM config is EMPTY - validator is likely NOT running in a dstack CVM!");
+                            warn!("⚠️  Full TDX verification will FAIL on platform-api side.");
+                            warn!("⚠️  Deploy validator via validator-auto-updater to run in a proper dstack CVM.");
+                        }
 
                         // Verify that the report_data in the quote matches the challenge
                         // Note: report_data is already hex-encoded from dstack SDK

@@ -1,19 +1,14 @@
 use platform_engine_dynamic_values::DynamicValuesManager;
 use platform_validator_challenge_manager::ChallengeManager;
-use platform_validator_quota::{CVMQuotaManager, ResourceRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-// Re-export types that might be needed elsewhere
-pub use platform_validator_quota::{QuotaResult, ResourceRequest as QuotaResourceRequest};
-
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
     pub dynamic_values: Arc<DynamicValuesManager>,
-    pub cvm_quota: Arc<CVMQuotaManager>,
     pub challenge_manager: Arc<ChallengeManager>,
     pub job_vm: Arc<dyn JobVmManagerTrait + Send + Sync>,
     pub network_proxy: Option<Arc<dyn NetworkProxyTrait + Send + Sync>>,
@@ -93,12 +88,6 @@ pub struct ReleaseCvmRequest {
 }
 
 #[derive(Deserialize)]
-pub struct InitQuotaRequest {
-    pub challenge_id: String,
-    pub total_quota: u32,
-}
-
-#[derive(Deserialize)]
 pub struct ChallengeCallbackRequest {
     pub job_id: String,
     pub results: serde_json::Value,
@@ -168,4 +157,5 @@ pub trait JobVmManagerTrait {
 pub trait NetworkProxyTrait {
     fn create_router(&self) -> axum::Router;
 }
+
 

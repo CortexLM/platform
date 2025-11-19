@@ -24,7 +24,6 @@ platform-validator-websocket = { workspace = true }
 platform-validator-http-server = { workspace = true }
 platform-validator-docker = { workspace = true }
 platform-validator-vmm = { workspace = true }
-platform-validator-quota = { workspace = true }
 platform-validator-epoch-manager = { workspace = true }
 
 # Dstack SDK

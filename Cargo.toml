@@ -12,7 +12,6 @@ members = [
     "crates/validator-docker",
     "crates/validator-epoch-manager",
     "crates/validator-vmm",
-    "crates/validator-quota",
     "crates/cli-commands",
     "bins/validator",
     "bins/cli",
@@ -41,7 +40,6 @@ platform-validator-websocket = { path = "crates/validator-websocket" }
 platform-validator-docker = { path = "crates/validator-docker" }
 platform-validator-epoch-manager = { path = "crates/validator-epoch-manager" }
 platform-validator-vmm = { path = "crates/validator-vmm" }
-platform-validator-quota = { path = "crates/validator-quota" }
 platform-cli-commands = { path = "crates/cli-commands" }
 
 # Core dependencies

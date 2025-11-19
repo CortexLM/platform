@@ -1,7 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
 use platform_validator_core::ChallengeState;
-use platform_validator_quota::ResourceRequest;
 use platform_validator_websocket::ChallengeWsClient;
 use serde_json;
 use std::sync::Arc;
@@ -409,20 +408,6 @@ pub async fn recycle_cvm(manager: &ChallengeManager, compose_hash: &str, cvm_id:
 
     if let Err(e) = manager.vmm_client().remove_vm(cvm_id).await {
         warn!("Failed to remove CVM {}: {}", cvm_id, e);
-    }
-
-    if resources.0 > 0 {
-        let _ = manager
-            .quota_manager()
-            .release(
-                compose_hash,
-                ResourceRequest {
-                    cpu_cores: resources.0,
-                    memory_mb: resources.1,
-                    disk_mb: resources.2,
-                },
-            )
-            .await;
     }
 
     let mut challenges = manager.challenges().write().await;
