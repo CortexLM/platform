@@ -11,7 +11,7 @@ A secure, high-performance validator for Platform Network that executes challeng
 
 **↗️ The official Platform Validator documentation ↗️**
 
-[Getting Started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Usage](docs/usage.md) · [Security](docs/security.md) · [API Reference](docs/api-reference.md)
+[Getting Started](docs/getting-started.md) · [Launching a Validator](docs/launching-validator.md) · [Architecture](docs/architecture.md) · [Usage](docs/usage.md) · [Security](docs/security.md) · [API Reference](docs/api-reference.md)
 
 </div>
 
@@ -53,6 +53,7 @@ Platform Network consists of several interconnected components that work togethe
 For complete documentation, see:
 
 - **[Getting Started](docs/getting-started.md)** - Installation, prerequisites, and quick start guide
+- **[Launching a Validator](docs/launching-validator.md)** - Instructions for launching validators (see [validator-launcher](https://github.com/PlatformNetwork/validator-launcher) for full details)
 - **[Architecture](docs/architecture.md)** - System architecture, components, and Platform API/Validator roles
 - **[Usage](docs/usage.md)** - Validator lifecycle, job execution, challenge management, and configuration
 - **[Security](docs/security.md)** - Security architecture, TDX attestation, CVM isolation, and network policies
